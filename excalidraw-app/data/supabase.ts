@@ -145,8 +145,15 @@ export const saveDocumentToSupabase = async (doc: {
 
     let { error } = await supabase.from("documents").upsert(payload, { onConflict: "id" });
 
-    // Fallback if folder_id column doesn't exist yet in Supabase
-    if (error && error.message?.includes("folder_id")) {
+    // Fallback if folder_id column or foreign key doesn't exist yet in Supabase
+    if (
+      error &&
+      (error.message?.includes("folder_id") ||
+        error.message?.includes("folders") ||
+        error.message?.includes("fkey") ||
+        error.message?.includes("foreign key") ||
+        error.message?.includes("violates"))
+    ) {
       delete payload.folder_id;
       const retry = await supabase.from("documents").upsert(payload, { onConflict: "id" });
       error = retry.error;

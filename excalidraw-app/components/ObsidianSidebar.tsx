@@ -105,6 +105,11 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
     }));
   };
 
+  const handleOpenFolderPrompt = (parentId: string | null) => {
+    setNewFolderName("");
+    setFolderPromptParentId(parentId);
+  };
+
   const handleCreateFolder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (folderPromptParentId === false) {
@@ -260,7 +265,7 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
                   title="New Sub-folder"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setFolderPromptParentId(folder.id);
+                    handleOpenFolderPrompt(folder.id);
                   }}
                 >
                   📁
@@ -401,8 +406,9 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
     );
   }
 
-  const rootFolders = folders.filter((f) => !f.parentId);
-  const rootDocs = filteredDocs.filter((d) => !d.folderId);
+  const folderIdSet = new Set(folders.map((f) => f.id));
+  const rootFolders = folders.filter((f) => !f.parentId || !folderIdSet.has(f.parentId));
+  const rootDocs = filteredDocs.filter((d) => !d.folderId || !folderIdSet.has(d.folderId));
 
   return (
     <aside className="obsidian-sidebar">
@@ -426,7 +432,7 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
             type="button"
             className="header-action-btn"
             title="New Folder"
-            onClick={() => setFolderPromptParentId(null)}
+            onClick={() => handleOpenFolderPrompt(null)}
           >
             📁
           </button>

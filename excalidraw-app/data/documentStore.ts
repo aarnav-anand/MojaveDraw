@@ -38,11 +38,26 @@ export interface ExcalidrawDoc extends DocumentMetadata {
   files?: BinaryFiles;
 }
 
-const docsStore = createStore("excalidraw-documents-db", "documents");
-const metaStore = createStore("excalidraw-documents-db", "documents-meta");
-const foldersStore = createStore("excalidraw-documents-db", "folders");
+// ---------------------------------------------------------------------------
+// Separate IndexedDB stores (each store in its own database to avoid
+// IDB multi-store schema versioning conflicts)
+// ---------------------------------------------------------------------------
+const docsStore = createStore("excalidraw-docs-db-v2", "documents");
+const metaStore = createStore("excalidraw-meta-db-v2", "metadata");
+const foldersStore = createStore("excalidraw-folders-db-v2", "folders");
+
+// Legacy database store for migration
+const legacyDocsStore = createStore("excalidraw-documents-db", "documents");
 
 const ACTIVE_DOC_STORAGE_KEY = "excalidraw_active_doc_id";
+
+// ---------------------------------------------------------------------------
+// In-Memory Cache (Guarantees instant UI updates without waiting for IDB disk)
+// ---------------------------------------------------------------------------
+const memoryDocs = new Map<string, ExcalidrawDoc>();
+const memoryMeta = new Map<string, DocumentMetadata>();
+const memoryFolders = new Map<string, FolderItem>();
+let isInitialized = false;
 
 // Store change subscribers
 type StoreListener = () => void;
@@ -108,32 +123,82 @@ export const getActiveDocumentId = (): string => {
 };
 
 // ---------------------------------------------------------------------------
+// INITIALIZATION & MIGRATION
+// ---------------------------------------------------------------------------
+const initializeStoresIfNeeded = async () => {
+  if (isInitialized) {
+    return;
+  }
+  isInitialized = true;
+
+  try {
+    // 1. Load local metadata into memory
+    const metaEntries = await entries(metaStore).catch(() => []);
+    for (const [, value] of metaEntries) {
+      if (value && typeof value === "object") {
+        const item = value as DocumentMetadata;
+        memoryMeta.set(item.id, item);
+      }
+    }
+
+    // 2. Load local folders into memory
+    const folderEntries = await entries(foldersStore).catch(() => []);
+    for (const [, value] of folderEntries) {
+      if (value && typeof value === "object") {
+        const item = value as FolderItem;
+        memoryFolders.set(item.id, item);
+      }
+    }
+
+    // 3. Migrate from legacy "excalidraw-documents-db" if needed
+    try {
+      const legacyEntries = await entries(legacyDocsStore).catch(() => []);
+      for (const [, value] of legacyEntries) {
+        if (value && typeof value === "object") {
+          const doc = value as ExcalidrawDoc;
+          if (!memoryMeta.has(doc.id)) {
+            const meta: DocumentMetadata = {
+              id: doc.id,
+              title: doc.title || "Untitled Drawing",
+              folderId: doc.folderId || null,
+              thumbnail: doc.thumbnail,
+              createdAt: doc.createdAt || Date.now(),
+              updatedAt: doc.updatedAt || Date.now(),
+              syncedToCloud: doc.syncedToCloud,
+            };
+            memoryMeta.set(doc.id, meta);
+            await set(doc.id, doc, docsStore).catch(console.warn);
+            await set(doc.id, meta, metaStore).catch(console.warn);
+          }
+        }
+      }
+    } catch (e) {
+      // Legacy db might not exist or be empty, ignore
+    }
+
+    // 4. Migrate from localStorage if needed (e.g. fresh installation)
+    await migrateFromLocalStorageIfNeeded();
+  } catch (error) {
+    console.error("Failed to initialize stores:", error);
+  }
+};
+
+// ---------------------------------------------------------------------------
 // FOLDERS MANAGEMENT
 // ---------------------------------------------------------------------------
 
 export const listFolders = async (): Promise<FolderItem[]> => {
-  try {
-    const localFolders: FolderItem[] = [];
-    const folderEntries = await entries(foldersStore);
-    for (const [, value] of folderEntries) {
-      if (value && typeof value === "object") {
-        localFolders.push(value as FolderItem);
-      }
-    }
+  await initializeStoresIfNeeded();
 
+  try {
+    // Check Supabase if configured and logged in
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
       if (user) {
         const cloudFolders = await fetchFoldersFromSupabase();
-        const mergedMap = new Map<string, FolderItem>();
-
-        for (const f of localFolders) {
-          mergedMap.set(f.id, f);
-        }
-
         for (const cf of cloudFolders) {
           const cfUpdatedAt = new Date(cf.updated_at).getTime();
-          const existing = mergedMap.get(cf.id);
+          const existing = memoryFolders.get(cf.id);
 
           if (!existing || cfUpdatedAt >= existing.updatedAt) {
             const item: FolderItem = {
@@ -144,22 +209,19 @@ export const listFolders = async (): Promise<FolderItem[]> => {
               updatedAt: cfUpdatedAt,
               syncedToCloud: true,
             };
-            mergedMap.set(cf.id, item);
-            await set(cf.id, item, foldersStore);
+            memoryFolders.set(cf.id, item);
+            set(cf.id, item, foldersStore).catch(console.warn);
           }
         }
-
-        const mergedList = Array.from(mergedMap.values());
-        mergedList.sort((a, b) => a.name.localeCompare(b.name));
-        return mergedList;
       }
     }
 
-    localFolders.sort((a, b) => a.name.localeCompare(b.name));
-    return localFolders;
+    const list = Array.from(memoryFolders.values());
+    list.sort((a, b) => a.name.localeCompare(b.name));
+    return list;
   } catch (error) {
     console.error("Failed to list folders:", error);
-    return [];
+    return Array.from(memoryFolders.values());
   }
 };
 
@@ -167,6 +229,8 @@ export const createFolder = async (
   name: string,
   parentId?: string | null,
 ): Promise<FolderItem> => {
+  await initializeStoresIfNeeded();
+
   const id = generateFolderId();
   const folder: FolderItem = {
     id,
@@ -176,8 +240,13 @@ export const createFolder = async (
     updatedAt: Date.now(),
   };
 
-  await set(folder.id, folder, foldersStore);
+  // Immediate in-memory cache update
+  memoryFolders.set(folder.id, folder);
 
+  // Background IDB write
+  set(folder.id, folder, foldersStore).catch(console.error);
+
+  // Cloud sync
   if (isSupabaseConfigured) {
     saveFolderToSupabase({
       id: folder.id,
@@ -186,7 +255,7 @@ export const createFolder = async (
     }).then((ok) => {
       if (ok) {
         folder.syncedToCloud = true;
-        set(folder.id, folder, foldersStore);
+        set(folder.id, folder, foldersStore).catch(console.warn);
       }
     });
   }
@@ -196,52 +265,57 @@ export const createFolder = async (
 };
 
 export const saveFolder = async (folder: FolderItem): Promise<void> => {
-  try {
-    const updated: FolderItem = {
-      ...folder,
-      updatedAt: Date.now(),
-    };
-    await set(updated.id, updated, foldersStore);
+  await initializeStoresIfNeeded();
 
-    if (isSupabaseConfigured) {
-      saveFolderToSupabase({
-        id: updated.id,
-        name: updated.name,
-        parent_id: updated.parentId,
-      }).then((ok) => {
-        if (ok) {
-          updated.syncedToCloud = true;
-          set(updated.id, updated, foldersStore);
-        }
-      });
-    }
-    notifyStoreChanged();
-  } catch (error) {
-    console.error("Failed to save folder:", error);
+  const updated: FolderItem = {
+    ...folder,
+    updatedAt: Date.now(),
+  };
+
+  memoryFolders.set(updated.id, updated);
+  set(updated.id, updated, foldersStore).catch(console.error);
+
+  if (isSupabaseConfigured) {
+    saveFolderToSupabase({
+      id: updated.id,
+      name: updated.name,
+      parent_id: updated.parentId,
+    }).then((ok) => {
+      if (ok) {
+        updated.syncedToCloud = true;
+        set(updated.id, updated, foldersStore).catch(console.warn);
+      }
+    });
   }
+
+  notifyStoreChanged();
 };
 
 export const deleteFolder = async (id: string): Promise<boolean> => {
+  await initializeStoresIfNeeded();
+
   try {
-    // 1. Delete folder from local IDB
-    await del(id, foldersStore);
+    memoryFolders.delete(id);
+    del(id, foldersStore).catch(console.error);
 
-    // 2. Unassign or delete sub-items
-    const allFolders = await listFolders();
-    const childFolders = allFolders.filter((f) => f.parentId === id);
-    for (const child of childFolders) {
-      await deleteFolder(child.id);
+    // Delete child folders
+    const allFolders = Array.from(memoryFolders.values());
+    for (const child of allFolders) {
+      if (child.parentId === id) {
+        await deleteFolder(child.id);
+      }
     }
 
-    const allDocs = await listDocuments();
-    const childDocs = allDocs.filter((d) => d.folderId === id);
-    for (const doc of childDocs) {
-      await moveDocumentToFolder(doc.id, null);
+    // Move child documents to root
+    const allDocs = Array.from(memoryMeta.values());
+    for (const doc of allDocs) {
+      if (doc.folderId === id) {
+        await moveDocumentToFolder(doc.id, null);
+      }
     }
 
-    // 3. Supabase delete
     if (isSupabaseConfigured) {
-      deleteFolderFromSupabase(id).catch(console.error);
+      deleteFolderFromSupabase(id).catch(console.warn);
     }
 
     notifyStoreChanged();
@@ -280,7 +354,7 @@ export const migrateFromLocalStorageIfNeeded = async (): Promise<ExcalidrawDoc |
         localStorage.removeItem(STORAGE_KEYS.LOCAL_STORAGE_ELEMENTS);
         localStorage.removeItem(STORAGE_KEYS.LOCAL_STORAGE_APP_STATE);
       } catch (e) {
-        console.warn("Could not remove legacy storage keys:", e);
+        // ignore
       }
 
       return defaultDoc;
@@ -292,49 +366,17 @@ export const migrateFromLocalStorageIfNeeded = async (): Promise<ExcalidrawDoc |
 };
 
 export const listDocuments = async (): Promise<DocumentMetadata[]> => {
+  await initializeStoresIfNeeded();
+
   try {
-    // 1. Fetch from local IndexedDB metaStore
-    const localMetas: DocumentMetadata[] = [];
-    const metaEntries = await entries(metaStore);
-    for (const [, value] of metaEntries) {
-      if (value && typeof value === "object") {
-        localMetas.push(value as DocumentMetadata);
-      }
-    }
-
-    // Ensure "default" document is indexed if it exists in docsStore
-    const hasDefault = localMetas.some((m) => m.id === "default");
-    if (!hasDefault) {
-      const defaultDoc = await get<ExcalidrawDoc>("default", docsStore);
-      if (defaultDoc) {
-        const meta: DocumentMetadata = {
-          id: defaultDoc.id,
-          title: defaultDoc.title || "My First Drawing",
-          folderId: defaultDoc.folderId || null,
-          thumbnail: defaultDoc.thumbnail,
-          createdAt: defaultDoc.createdAt,
-          updatedAt: defaultDoc.updatedAt,
-          syncedToCloud: defaultDoc.syncedToCloud,
-        };
-        await set("default", meta, metaStore);
-        localMetas.push(meta);
-      }
-    }
-
-    // 2. If Supabase is connected and user is logged in, merge cloud documents
+    // Merge cloud documents if Supabase user is logged in
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
       if (user) {
         const cloudDocs = await fetchDocumentsFromSupabase();
-        const mergedMap = new Map<string, DocumentMetadata>();
-
-        for (const meta of localMetas) {
-          mergedMap.set(meta.id, meta);
-        }
-
         for (const cloudDoc of cloudDocs) {
           const cloudUpdatedAt = new Date(cloudDoc.updated_at).getTime();
-          const existing = mergedMap.get(cloudDoc.id);
+          const existing = memoryMeta.get(cloudDoc.id);
 
           if (!existing || cloudUpdatedAt >= existing.updatedAt) {
             const meta: DocumentMetadata = {
@@ -346,34 +388,39 @@ export const listDocuments = async (): Promise<DocumentMetadata[]> => {
               updatedAt: cloudUpdatedAt,
               syncedToCloud: true,
             };
-            mergedMap.set(cloudDoc.id, meta);
-            await set(cloudDoc.id, meta, metaStore);
+            memoryMeta.set(cloudDoc.id, meta);
+            set(cloudDoc.id, meta, metaStore).catch(console.warn);
           }
         }
-
-        const mergedList = Array.from(mergedMap.values());
-        mergedList.sort((a, b) => b.updatedAt - a.updatedAt);
-        return mergedList;
       }
     }
 
-    localMetas.sort((a, b) => b.updatedAt - a.updatedAt);
-    return localMetas;
+    const list = Array.from(memoryMeta.values());
+    list.sort((a, b) => b.updatedAt - a.updatedAt);
+    return list;
   } catch (error) {
     console.error("Failed to list documents:", error);
-    return [];
+    return Array.from(memoryMeta.values());
   }
 };
 
 export const loadDocument = async (id: string): Promise<ExcalidrawDoc | null> => {
+  await initializeStoresIfNeeded();
+
   try {
-    // 1. Try IndexedDB
-    const localDoc = await get<ExcalidrawDoc>(id, docsStore);
+    // 1. In-memory check
+    if (memoryDocs.has(id)) {
+      return memoryDocs.get(id)!;
+    }
+
+    // 2. IndexedDB check
+    const localDoc = await get<ExcalidrawDoc>(id, docsStore).catch(() => null);
     if (localDoc) {
+      memoryDocs.set(id, localDoc);
       return localDoc;
     }
 
-    // 2. If not found locally, try Supabase if configured
+    // 3. Supabase check
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
       if (user) {
@@ -391,13 +438,14 @@ export const loadDocument = async (id: string): Promise<ExcalidrawDoc | null> =>
             updatedAt: new Date(cloudDoc.updated_at).getTime(),
             syncedToCloud: true,
           };
-          await saveDocument(doc, false); // Cache locally
+          memoryDocs.set(id, doc);
+          saveDocument(doc, false).catch(console.warn);
           return doc;
         }
       }
     }
 
-    // 3. Fallback to localStorage migration if id is default
+    // 4. Default document check
     if (id === "default") {
       const migrated = await migrateFromLocalStorageIfNeeded();
       if (migrated) {
@@ -416,8 +464,10 @@ export const saveDocument = async (
   doc: Partial<ExcalidrawDoc> & { id: string },
   syncCloud: boolean = true,
 ): Promise<void> => {
+  await initializeStoresIfNeeded();
+
   try {
-    const existing = (await get<ExcalidrawDoc>(doc.id, docsStore)) || null;
+    const existing = memoryDocs.get(doc.id) || (await get<ExcalidrawDoc>(doc.id, docsStore).catch(() => null));
 
     const resolvedTitle =
       doc.title?.trim() ||
@@ -445,10 +495,6 @@ export const saveDocument = async (
       syncedToCloud: existing?.syncedToCloud || false,
     };
 
-    // Save full document to IndexedDB
-    await set(fullDoc.id, fullDoc, docsStore);
-
-    // Save lightweight metadata to index store
     const meta: DocumentMetadata = {
       id: fullDoc.id,
       title: fullDoc.title,
@@ -458,9 +504,16 @@ export const saveDocument = async (
       updatedAt: fullDoc.updatedAt,
       syncedToCloud: fullDoc.syncedToCloud,
     };
-    await set(fullDoc.id, meta, metaStore);
 
-    // Async sync to Supabase if configured and logged in
+    // Immediate in-memory update
+    memoryDocs.set(fullDoc.id, fullDoc);
+    memoryMeta.set(fullDoc.id, meta);
+
+    // Background IDB writes
+    set(fullDoc.id, fullDoc, docsStore).catch(console.error);
+    set(fullDoc.id, meta, metaStore).catch(console.error);
+
+    // Supabase sync
     if (syncCloud && isSupabaseConfigured) {
       getSupabaseUser().then((user) => {
         if (user) {
@@ -476,8 +529,8 @@ export const saveDocument = async (
             if (success) {
               fullDoc.syncedToCloud = true;
               meta.syncedToCloud = true;
-              set(fullDoc.id, fullDoc, docsStore);
-              set(fullDoc.id, meta, metaStore);
+              set(fullDoc.id, fullDoc, docsStore).catch(console.warn);
+              set(fullDoc.id, meta, metaStore).catch(console.warn);
             }
           });
         }
@@ -494,6 +547,8 @@ export const createDocument = async (
   title?: string,
   folderId?: string | null,
 ): Promise<ExcalidrawDoc> => {
+  await initializeStoresIfNeeded();
+
   const id = generateDocId();
   const cleanTitle = title?.trim() || "Untitled Drawing";
   const doc: ExcalidrawDoc = {
@@ -505,6 +560,7 @@ export const createDocument = async (
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
+
   await saveDocument(doc);
   notifyStoreChanged();
   return doc;
@@ -538,12 +594,16 @@ export const duplicateDocument = async (id: string): Promise<ExcalidrawDoc | nul
 };
 
 export const deleteDocument = async (id: string): Promise<boolean> => {
+  await initializeStoresIfNeeded();
+
   try {
-    await del(id, docsStore);
-    await del(id, metaStore);
+    memoryDocs.delete(id);
+    memoryMeta.delete(id);
+    del(id, docsStore).catch(console.error);
+    del(id, metaStore).catch(console.error);
 
     if (isSupabaseConfigured) {
-      deleteDocumentFromSupabase(id).catch(console.error);
+      deleteDocumentFromSupabase(id).catch(console.warn);
     }
     notifyStoreChanged();
     return true;
