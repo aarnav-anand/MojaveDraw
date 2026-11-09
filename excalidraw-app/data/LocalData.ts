@@ -74,6 +74,7 @@ class LocalFileManager extends FileManager {
 const saveDataStateToLocalStorage = (
   elements: readonly ExcalidrawElement[],
   appState: AppState,
+  files?: BinaryFiles,
 ) => {
   try {
     const _appState = clearAppStateForLocalStorage(appState);
@@ -88,12 +89,13 @@ const saveDataStateToLocalStorage = (
     const nonDeletedElements = getNonDeletedElements(elements);
     const activeDocId = getActiveDocumentId();
 
-    // 1. High-capacity persistence via IndexedDB (eliminates 5MB localStorage threshold)
+    // 1. High-capacity persistence via IndexedDB and Supabase cloud sync (including binary files/PDFs)
     saveDocument({
       id: activeDocId,
       title: _appState.name || undefined,
       elements: nonDeletedElements,
       appState: _appState,
+      files,
     });
 
     // 2. Best-effort write to localStorage for compatibility if it fits
@@ -140,7 +142,7 @@ export class LocalData {
       files: BinaryFiles,
       onFilesSaved: () => void,
     ) => {
-      saveDataStateToLocalStorage(elements, appState);
+      saveDataStateToLocalStorage(elements, appState, files);
 
       await this.fileStorage.saveFiles({
         elements,

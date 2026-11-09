@@ -22,6 +22,7 @@ export interface SupabaseDocumentRecord {
   thumbnail_url?: string | null;
   created_at: string;
   updated_at: string;
+  files?: BinaryFiles;
 }
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -119,22 +120,20 @@ export const saveDocumentToSupabase = async (doc: {
       return false;
     }
 
-    // Optionally upload embedded files
-    if (doc.files) {
-      const uploadPromises = Object.entries(doc.files).map(async ([fileId, fileData]) => {
-        if (fileData) {
-          await uploadFileToSupabaseStorage(fileId, fileData);
-        }
-      });
-      await Promise.all(uploadPromises);
-    }
+    // Embed files inside app_state to guarantee multi-device persistence across devices
+    // even if storage buckets or external policies are unconfigured
+    const hasFiles = doc.files && Object.keys(doc.files).length > 0;
+    const appStateToSave = {
+      ...doc.appState,
+      ...(hasFiles ? { files: doc.files } : {}),
+    };
 
     const payload: any = {
       id: doc.id,
       user_id: user.id,
       title: doc.title || "Untitled Drawing",
       elements: doc.elements,
-      app_state: doc.appState,
+      app_state: appStateToSave,
       thumbnail_url: doc.thumbnail || null,
       updated_at: new Date().toISOString(),
     };
@@ -143,7 +142,18 @@ export const saveDocumentToSupabase = async (doc: {
       payload.folder_id = doc.folderId;
     }
 
+    if (hasFiles) {
+      payload.files = doc.files;
+    }
+
     let { error } = await supabase.from("documents").upsert(payload, { onConflict: "id" });
+
+    // Fallback if 'files' column does not exist as a separate column in schema
+    if (error && error.message?.includes("files")) {
+      delete payload.files;
+      const retry = await supabase.from("documents").upsert(payload, { onConflict: "id" });
+      error = retry.error;
+    }
 
     // Fallback if folder_id column or foreign key doesn't exist yet in Supabase
     if (
@@ -182,11 +192,11 @@ export const fetchDocumentsFromSupabase = async (): Promise<SupabaseDocumentReco
 
     let { data, error } = await supabase
       .from("documents")
-      .select("id, user_id, title, folder_id, elements, app_state, thumbnail_url, created_at, updated_at")
+      .select("*")
       .order("updated_at", { ascending: false });
 
-    // Fallback if folder_id does not exist in schema yet
-    if (error && error.message?.includes("folder_id")) {
+    // Fallback if select * encounters any column issues
+    if (error) {
       const fallback = await supabase
         .from("documents")
         .select("id, user_id, title, elements, app_state, thumbnail_url, created_at, updated_at")
@@ -199,7 +209,29 @@ export const fetchDocumentsFromSupabase = async (): Promise<SupabaseDocumentReco
       console.error("Error fetching documents from Supabase:", error);
       return [];
     }
-    return data as SupabaseDocumentRecord[];
+
+    const records: SupabaseDocumentRecord[] = (data as any[]).map((row) => {
+      const files = row.files || row.app_state?.files || undefined;
+      let cleanAppState = row.app_state || {};
+      if (cleanAppState.files && !row.files) {
+        const { files: _, ...rest } = cleanAppState;
+        cleanAppState = rest;
+      }
+      return {
+        id: row.id,
+        user_id: row.user_id,
+        title: row.title,
+        folder_id: row.folder_id || null,
+        elements: row.elements || [],
+        app_state: cleanAppState,
+        thumbnail_url: row.thumbnail_url || undefined,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        files,
+      };
+    });
+
+    return records;
   } catch (err) {
     console.error("Exception fetching documents from Supabase:", err);
     return [];
@@ -302,11 +334,53 @@ export const fetchDocumentFromSupabase = async (
     if (error || !data) {
       return null;
     }
-    return data as SupabaseDocumentRecord;
+
+    const row: any = data;
+    const files = row.files || row.app_state?.files || undefined;
+    let cleanAppState = row.app_state || {};
+    if (cleanAppState.files && !row.files) {
+      const { files: _, ...rest } = cleanAppState;
+      cleanAppState = rest;
+    }
+
+    return {
+      id: row.id,
+      user_id: row.user_id,
+      title: row.title,
+      folder_id: row.folder_id || null,
+      elements: row.elements || [],
+      app_state: cleanAppState,
+      thumbnail_url: row.thumbnail_url || undefined,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      files,
+    };
   } catch (err) {
     console.error("Exception fetching document from Supabase:", err);
     return null;
   }
+};
+
+export const subscribeToSupabaseDocumentChanges = (
+  callback: (payload: any) => void,
+) => {
+  if (!supabase) {
+    return () => {};
+  }
+  const channel = supabase
+    .channel("canvas-sync-documents")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "documents" },
+      (payload) => {
+        callback(payload);
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase?.removeChannel(channel);
+  };
 };
 
 export const deleteDocumentFromSupabase = async (id: string): Promise<boolean> => {

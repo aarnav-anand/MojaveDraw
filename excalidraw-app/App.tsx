@@ -151,7 +151,11 @@ import { AppSidebar } from "./components/AppSidebar";
 import { DocumentsDashboard, NewDrawingDialog } from "./components/DocumentsDashboard";
 import { ObsidianSidebar } from "./components/ObsidianSidebar";
 import { SupabaseAuthModal } from "./components/SupabaseAuthModal";
-import { isSupabaseConfigured, getSupabaseUser } from "./data/supabase";
+import {
+  isSupabaseConfigured,
+  getSupabaseUser,
+  onSupabaseAuthStateChange,
+} from "./data/supabase";
 import {
   insertPdfIntoCanvas,
   hasPdfInCanvas,
@@ -160,10 +164,13 @@ import {
 import type { PdfImportProgress } from "./data/pdfImporter";
 import {
   getActiveDocumentId,
+  getActiveDocIdFromUrl,
+  listDocuments,
   loadDocument,
   saveDocument,
   createDocument,
   setActiveDocIdToUrl,
+  subscribeToStoreChanges,
 } from "./data/documentStore";
 
 import type { CollabAPI } from "./collab/Collab";
@@ -249,8 +256,11 @@ const initializeScene = async (opts: {
 
   const activeDocId = getActiveDocumentId();
   const currentDoc = await loadDocument(activeDocId);
-  if (currentDoc?.files && opts.excalidrawAPI) {
-    opts.excalidrawAPI.addFiles(Object.values(currentDoc.files));
+  if (currentDoc) {
+    setActiveDocIdToUrl(currentDoc.id);
+    if (currentDoc.files && opts.excalidrawAPI) {
+      opts.excalidrawAPI.addFiles(Object.values(currentDoc.files));
+    }
   }
   const localDataState = currentDoc
     ? {
@@ -542,16 +552,128 @@ const ExcalidrawWrapper = () => {
     }
   }, [excalidrawAPI]);
 
-  // Off the bat: prompt user to sign in if not authenticated yet
-  useEffect(() => {
-    if (isSupabaseConfigured) {
-      getSupabaseUser().then((user) => {
-        if (!user) {
-          setIsAuthModalOpen(true);
+  /**
+   * Switch active document from the Obsidian sidebar or dashboard
+   */
+  const handleSwitchDocument = useCallback(
+    async (targetId: string, forceReload = false) => {
+      if (!excalidrawAPI) {
+        return;
+      }
+      const currentDocId = getActiveDocumentId();
+      if (targetId === currentDocId && !forceReload) {
+        return;
+      }
+
+      // Save current active document before switching away
+      if (currentDocId && targetId !== currentDocId) {
+        await saveDocument({
+          id: currentDocId,
+          title: excalidrawAPI.getName() || undefined,
+          elements: excalidrawAPI.getSceneElements(),
+          appState: excalidrawAPI.getAppState(),
+          files: excalidrawAPI.getFiles(),
+        });
+      }
+
+      const doc = await loadDocument(targetId);
+      if (doc) {
+        setActiveDocIdToUrl(doc.id);
+        setActiveDocId(doc.id);
+
+        if (doc.files && Object.keys(doc.files).length > 0) {
+          excalidrawAPI.addFiles(Object.values(doc.files));
         }
-      });
+
+        setHasPdf(hasPdfInCanvas(doc.elements || []));
+
+        excalidrawAPI.updateScene({
+          elements: doc.elements || [],
+          appState: {
+            ...doc.appState,
+            name: doc.title,
+          } as any,
+        });
+
+        if (doc.elements && doc.elements.length > 0) {
+          excalidrawAPI.setViewport({
+            target: doc.elements[0],
+            fit: "scale-down",
+            animation: true,
+          });
+        }
+      }
+    },
+    [excalidrawAPI],
+  );
+
+  // Off the bat: prompt user to sign in if not authenticated yet,
+  // and automatically load the user's latest cloud document across devices
+  useEffect(() => {
+    if (!isSupabaseConfigured) {
+      return;
     }
-  }, []);
+
+    const syncLatestFromCloud = async () => {
+      const user = await getSupabaseUser();
+      if (!user) {
+        setIsAuthModalOpen(true);
+      } else if (excalidrawAPI) {
+        const urlId = getActiveDocIdFromUrl();
+        const cloudDocs = await listDocuments();
+        if (cloudDocs.length > 0) {
+          const target = (urlId ? cloudDocs.find((d) => d.id === urlId) : null) || cloudDocs[0];
+          await handleSwitchDocument(target.id, true);
+        }
+      }
+    };
+
+    syncLatestFromCloud();
+
+    const unsubscribe = onSupabaseAuthStateChange(async (user) => {
+      if (user && excalidrawAPI) {
+        const urlId = getActiveDocIdFromUrl();
+        const cloudDocs = await listDocuments();
+        if (cloudDocs.length > 0) {
+          const target = (urlId ? cloudDocs.find((d) => d.id === urlId) : null) || cloudDocs[0];
+          await handleSwitchDocument(target.id, true);
+        }
+      }
+    });
+
+    return () => unsubscribe();
+  }, [excalidrawAPI, handleSwitchDocument]);
+
+  // Synchronize changes from cloud/store updates into active canvas
+  useEffect(() => {
+    const unsubscribe = subscribeToStoreChanges(async () => {
+      if (!excalidrawAPI) {
+        return;
+      }
+      const appState = excalidrawAPI.getAppState();
+      if (appState.editingTextElement) {
+        return;
+      }
+      const currentDocId = getActiveDocumentId();
+      if (currentDocId) {
+        const doc = await loadDocument(currentDocId);
+        if (doc) {
+          if (doc.files && Object.keys(doc.files).length > 0) {
+            excalidrawAPI.addFiles(Object.values(doc.files));
+          }
+          setHasPdf(hasPdfInCanvas(doc.elements || []));
+          excalidrawAPI.updateScene({
+            elements: doc.elements || [],
+            appState: {
+              ...doc.appState,
+              name: doc.title,
+            } as any,
+          });
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, [excalidrawAPI]);
 
   useEffect(() => {
     const onHashChange = () => {
@@ -582,6 +704,19 @@ const ExcalidrawWrapper = () => {
           (progress) => setPdfProgress(progress),
         );
         setHasPdf(true);
+
+        // Immediately persist the PDF pages and elements to Supabase cloud
+        const currentDocId = getActiveDocumentId();
+        await saveDocument(
+          {
+            id: currentDocId,
+            title: excalidrawAPI.getName() || undefined,
+            elements: excalidrawAPI.getSceneElements(),
+            appState: excalidrawAPI.getAppState(),
+            files: excalidrawAPI.getFiles(),
+          },
+          true,
+        );
       } catch (err: any) {
         console.error("Failed to insert PDF:", err);
         setErrorMessage(err.message || "Failed to parse and insert PDF.");
@@ -608,51 +743,6 @@ const ExcalidrawWrapper = () => {
       return true;
     },
     [handlePdfImport],
-  );
-
-  /**
-   * Switch active document from the Obsidian sidebar or dashboard
-   */
-  const handleSwitchDocument = useCallback(
-    async (targetId: string) => {
-      if (!excalidrawAPI) {
-        return;
-      }
-      const currentDocId = getActiveDocumentId();
-      if (targetId === currentDocId) {
-        return;
-      }
-
-      // Save current active document before switching away
-      await saveDocument({
-        id: currentDocId,
-        title: excalidrawAPI.getName() || undefined,
-        elements: excalidrawAPI.getSceneElements(),
-        appState: excalidrawAPI.getAppState(),
-        files: excalidrawAPI.getFiles(),
-      });
-
-      const doc = await loadDocument(targetId);
-      if (doc) {
-        setActiveDocIdToUrl(targetId);
-        setActiveDocId(targetId);
-
-        if (doc.files) {
-          excalidrawAPI.addFiles(Object.values(doc.files));
-        }
-
-        setHasPdf(hasPdfInCanvas(doc.elements || []));
-
-        excalidrawAPI.updateScene({
-          elements: doc.elements || [],
-          appState: {
-            ...doc.appState,
-            name: doc.title,
-          } as any,
-        });
-      }
-    },
-    [excalidrawAPI],
   );
 
   /**
@@ -1658,6 +1748,16 @@ const ExcalidrawWrapper = () => {
       <SupabaseAuthModal
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
+        onSyncComplete={async () => {
+          if (excalidrawAPI) {
+            const cloudDocs = await listDocuments();
+            if (cloudDocs.length > 0) {
+              const urlId = getActiveDocIdFromUrl();
+              const target = (urlId ? cloudDocs.find((d) => d.id === urlId) : null) || cloudDocs[0];
+              await handleSwitchDocument(target.id, true);
+            }
+          }
+        }}
       />
 
       {showNewDrawingDialog && (

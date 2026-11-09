@@ -7,10 +7,12 @@ import {
   getSupabaseUser,
   saveDocumentToSupabase,
   fetchDocumentsFromSupabase,
+  fetchDocumentFromSupabase,
   deleteDocumentFromSupabase,
   fetchFoldersFromSupabase,
   saveFolderToSupabase,
   deleteFolderFromSupabase,
+  subscribeToSupabaseDocumentChanges,
 } from "./supabase";
 
 export interface FolderItem {
@@ -79,6 +81,51 @@ export const notifyStoreChanged = () => {
     }
   });
 };
+
+// Real-time synchronization across devices via Supabase
+if (typeof window !== "undefined" && isSupabaseConfigured) {
+  subscribeToSupabaseDocumentChanges(async (payload) => {
+    try {
+      if (payload.new && payload.new.id) {
+        const cloudDoc = await fetchDocumentFromSupabase(payload.new.id);
+        if (cloudDoc) {
+          const docFiles = cloudDoc.files || (cloudDoc.app_state as any)?.files;
+          const doc: ExcalidrawDoc = {
+            id: cloudDoc.id,
+            title: cloudDoc.title,
+            folderId: cloudDoc.folder_id || null,
+            elements: cloudDoc.elements,
+            appState: cloudDoc.app_state,
+            thumbnail: cloudDoc.thumbnail_url || undefined,
+            files: docFiles,
+            createdAt: new Date(cloudDoc.created_at).getTime(),
+            updatedAt: new Date(cloudDoc.updated_at).getTime(),
+            syncedToCloud: true,
+          };
+          memoryDocs.set(doc.id, doc);
+          memoryMeta.set(doc.id, {
+            id: doc.id,
+            title: doc.title,
+            folderId: doc.folderId,
+            thumbnail: doc.thumbnail,
+            createdAt: doc.createdAt,
+            updatedAt: doc.updatedAt,
+            syncedToCloud: true,
+          });
+          set(doc.id, doc, docsStore).catch(console.warn);
+          notifyStoreChanged();
+        }
+      } else if (payload.eventType === "DELETE" && payload.old && payload.old.id) {
+        memoryDocs.delete(payload.old.id);
+        memoryMeta.delete(payload.old.id);
+        del(payload.old.id, docsStore).catch(console.warn);
+        notifyStoreChanged();
+      }
+    } catch (err) {
+      console.error("Realtime sync error:", err);
+    }
+  });
+}
 
 export const generateDocId = (): string => {
   return "doc_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
@@ -432,41 +479,53 @@ export const loadDocument = async (id: string): Promise<ExcalidrawDoc | null> =>
   await initializeStoresIfNeeded();
 
   try {
-    // 1. In-memory check
-    if (memoryDocs.has(id)) {
-      return memoryDocs.get(id)!;
-    }
-
-    // 2. IndexedDB check
-    const localDoc = await get<ExcalidrawDoc>(id, docsStore).catch(() => null);
-    if (localDoc) {
-      memoryDocs.set(id, localDoc);
-      return localDoc;
-    }
-
-    // 3. Supabase check
+    // 1. If Supabase is configured, fetch latest version from cloud
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
       if (user) {
         const cloudDocs = await fetchDocumentsFromSupabase();
-        const cloudDoc = cloudDocs.find((d) => d.id === id);
+        const cloudDoc =
+          cloudDocs.find((d) => d.id === id) ||
+          (id === "default" && cloudDocs.length > 0 ? cloudDocs[0] : null);
+
         if (cloudDoc) {
-          const doc: ExcalidrawDoc = {
-            id: cloudDoc.id,
-            title: cloudDoc.title,
-            folderId: cloudDoc.folder_id || null,
-            elements: cloudDoc.elements,
-            appState: cloudDoc.app_state,
-            thumbnail: cloudDoc.thumbnail_url || undefined,
-            createdAt: new Date(cloudDoc.created_at).getTime(),
-            updatedAt: new Date(cloudDoc.updated_at).getTime(),
-            syncedToCloud: true,
-          };
-          memoryDocs.set(id, doc);
-          saveDocument(doc, false).catch(console.warn);
-          return doc;
+          const cloudUpdatedAt = new Date(cloudDoc.updated_at).getTime();
+          const localDoc =
+            memoryDocs.get(cloudDoc.id) ||
+            (await get<ExcalidrawDoc>(cloudDoc.id, docsStore).catch(() => null));
+
+          if (!localDoc || cloudUpdatedAt >= localDoc.updatedAt) {
+            const docFiles = cloudDoc.files || (cloudDoc.app_state as any)?.files;
+            const doc: ExcalidrawDoc = {
+              id: cloudDoc.id,
+              title: cloudDoc.title,
+              folderId: cloudDoc.folder_id || null,
+              elements: cloudDoc.elements,
+              appState: cloudDoc.app_state,
+              thumbnail: cloudDoc.thumbnail_url || undefined,
+              files: docFiles,
+              createdAt: new Date(cloudDoc.created_at).getTime(),
+              updatedAt: cloudUpdatedAt,
+              syncedToCloud: true,
+            };
+            memoryDocs.set(doc.id, doc);
+            set(doc.id, doc, docsStore).catch(console.warn);
+            return doc;
+          }
         }
       }
+    }
+
+    // 2. In-memory check
+    if (memoryDocs.has(id)) {
+      return memoryDocs.get(id)!;
+    }
+
+    // 3. IndexedDB check
+    const localDoc = await get<ExcalidrawDoc>(id, docsStore).catch(() => null);
+    if (localDoc) {
+      memoryDocs.set(id, localDoc);
+      return localDoc;
     }
 
     // 4. Default document check
