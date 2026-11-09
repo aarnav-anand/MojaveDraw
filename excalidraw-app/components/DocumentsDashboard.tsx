@@ -9,7 +9,7 @@ import {
   getActiveDocumentId,
   setActiveDocIdToUrl,
 } from "../data/documentStore";
-import type { DocumentMetadata, ExcalidrawDoc } from "../data/documentStore";
+import type { DocumentMetadata } from "../data/documentStore";
 import {
   isSupabaseConfigured,
   getSupabaseUser,
@@ -26,6 +26,74 @@ import {
 } from "@excalidraw/excalidraw/components/icons";
 
 import "./DocumentsDashboard.scss";
+
+// ---------------------------------------------------------------------------
+// NewDrawingDialog — inline naming prompt shown before a doc is created
+// ---------------------------------------------------------------------------
+interface NewDrawingDialogProps {
+  onConfirm: (name: string) => void;
+  onCancel: () => void;
+}
+
+export const NewDrawingDialog: React.FC<NewDrawingDialogProps> = ({
+  onConfirm,
+  onCancel,
+}) => {
+  const [name, setName] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    // Auto-focus the input as soon as the dialog mounts
+    inputRef.current?.focus();
+  }, []);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onConfirm(name.trim() || "Untitled Drawing");
+  };
+
+  return (
+    <div
+      className="new-drawing-dialog-overlay"
+      onClick={onCancel}
+    >
+      <div
+        className="new-drawing-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="new-drawing-title"
+      >
+        <h3 id="new-drawing-title">Name your drawing</h3>
+        <p>Give this drawing a name so you can find it later.</p>
+        <form onSubmit={handleSubmit}>
+          <input
+            ref={inputRef}
+            type="text"
+            className="new-drawing-name-input"
+            placeholder="e.g. Architecture Diagram, Meeting Notes…"
+            value={name}
+            maxLength={120}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                onCancel();
+              }
+            }}
+          />
+          <div className="new-drawing-dialog-actions">
+            <button type="button" className="btn-cancel" onClick={onCancel}>
+              Cancel
+            </button>
+            <button type="submit" className="btn-create">
+              ✏️ Create &amp; Open
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
 
 interface DocumentsDashboardProps {
   isOpen: boolean;
@@ -46,6 +114,7 @@ export const DocumentsDashboard: React.FC<DocumentsDashboardProps> = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [showNewDrawingDialog, setShowNewDrawingDialog] = useState(false);
   const modalRef = useRef<HTMLDivElement>(null);
 
   const fetchDocs = useCallback(async () => {
@@ -69,8 +138,16 @@ export const DocumentsDashboard: React.FC<DocumentsDashboardProps> = ({
     return null;
   }
 
-  const handleCreateNew = async () => {
-    // If currently on an active scene, make sure to save it first
+  /** Open the naming dialog */
+  const handleCreateNew = () => {
+    setShowNewDrawingDialog(true);
+  };
+
+  /** Called when the user confirms a name in the dialog */
+  const handleConfirmNewDrawing = async (name: string) => {
+    setShowNewDrawingDialog(false);
+
+    // Save the current active document before switching away
     if (excalidrawAPI) {
       const currentElements = excalidrawAPI.getSceneElements();
       const currentAppState = excalidrawAPI.getAppState();
@@ -83,7 +160,8 @@ export const DocumentsDashboard: React.FC<DocumentsDashboardProps> = ({
       });
     }
 
-    const newDoc = await createDocument("Untitled Drawing");
+    // Create the new named document — saveDocument already pushes to Supabase
+    const newDoc = await createDocument(name);
     setActiveDocIdToUrl(newDoc.id);
     setActiveDocId(newDoc.id);
 
@@ -269,10 +347,17 @@ export const DocumentsDashboard: React.FC<DocumentsDashboardProps> = ({
   };
 
   return (
-    <div
-      className="documents-dashboard-overlay"
-      onClick={onClose}
-    >
+    <>
+      {showNewDrawingDialog && (
+        <NewDrawingDialog
+          onConfirm={handleConfirmNewDrawing}
+          onCancel={() => setShowNewDrawingDialog(false)}
+        />
+      )}
+      <div
+        className="documents-dashboard-overlay"
+        onClick={onClose}
+      >
       <div
         className="documents-dashboard-modal"
         ref={modalRef}
@@ -475,5 +560,6 @@ export const DocumentsDashboard: React.FC<DocumentsDashboardProps> = ({
         </div>
       </div>
     </div>
+    </>
   );
 };

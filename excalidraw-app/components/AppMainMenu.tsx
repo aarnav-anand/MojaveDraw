@@ -25,6 +25,7 @@ export const AppMainMenu: React.FC<{
   onOpenDashboard?: () => void;
   onInsertPdf?: () => void;
   onOpenSupabaseAuth?: () => void;
+  onNewDrawing?: () => void;
 }> = React.memo((props) => {
   const { t } = useI18n();
   return (
@@ -35,6 +36,14 @@ export const AppMainMenu: React.FC<{
           onSelect={props.onOpenDashboard}
         >
           My Drawings
+        </MainMenu.Item>
+      )}
+      {props.onNewDrawing && (
+        <MainMenu.Item
+          icon={<span style={{ fontSize: "1.1rem" }}>✏️</span>}
+          onSelect={props.onNewDrawing}
+        >
+          New Drawing
         </MainMenu.Item>
       )}
       {props.onInsertPdf && (
@@ -53,7 +62,7 @@ export const AppMainMenu: React.FC<{
           Supabase Cloud Sync
         </MainMenu.Item>
       )}
-      {(props.onOpenDashboard || props.onInsertPdf) && <MainMenu.Separator />}
+      {(props.onOpenDashboard || props.onNewDrawing || props.onInsertPdf) && <MainMenu.Separator />}
       <MainMenu.DefaultItems.LoadScene />
       <MainMenu.DefaultItems.SaveToActiveFile />
       <MainMenu.DefaultItems.Export />

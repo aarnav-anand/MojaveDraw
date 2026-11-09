@@ -148,11 +148,17 @@ import "./index.scss";
 
 import { ExcalidrawPlusPromoBanner } from "./components/ExcalidrawPlusPromoBanner";
 import { AppSidebar } from "./components/AppSidebar";
-import { DocumentsDashboard } from "./components/DocumentsDashboard";
+import { DocumentsDashboard, NewDrawingDialog } from "./components/DocumentsDashboard";
 import { SupabaseAuthModal } from "./components/SupabaseAuthModal";
 import { insertPdfIntoCanvas } from "./data/pdfImporter";
 import type { PdfImportProgress } from "./data/pdfImporter";
-import { getActiveDocumentId, loadDocument } from "./data/documentStore";
+import {
+  getActiveDocumentId,
+  loadDocument,
+  saveDocument,
+  createDocument,
+  setActiveDocIdToUrl,
+} from "./data/documentStore";
 
 import type { CollabAPI } from "./collab/Collab";
 
@@ -495,6 +501,7 @@ const ExcalidrawWrapper = () => {
     );
   });
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [showNewDrawingDialog, setShowNewDrawingDialog] = useState(false);
   const [pdfProgress, setPdfProgress] = useState<PdfImportProgress | null>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const appContainerRef = useRef<HTMLDivElement>(null);
@@ -551,6 +558,40 @@ const ExcalidrawWrapper = () => {
       return true;
     },
     [handlePdfImport],
+  );
+
+  /**
+   * Called when the user wants to start a fresh drawing from the main app
+   * (hamburger menu → "New Drawing"). Shows the naming dialog, then creates
+   * the document, switches the canvas to it, and syncs to Supabase.
+   */
+  const handleNewDrawingConfirm = useCallback(
+    async (name: string) => {
+      setShowNewDrawingDialog(false);
+      if (!excalidrawAPI) {
+        return;
+      }
+
+      // Persist current canvas before switching
+      const activeDocId = getActiveDocumentId();
+      await saveDocument({
+        id: activeDocId,
+        elements: excalidrawAPI.getSceneElements(),
+        appState: excalidrawAPI.getAppState(),
+        files: excalidrawAPI.getFiles(),
+      });
+
+      // Create the new named document (saveDocument inside pushes to Supabase)
+      const newDoc = await createDocument(name);
+      setActiveDocIdToUrl(newDoc.id);
+
+      excalidrawAPI.resetScene();
+      excalidrawAPI.updateScene({
+        elements: [],
+        appState: { name: newDoc.title },
+      });
+    },
+    [excalidrawAPI],
   );
 
   // ---------------------------------------------------------------------------
@@ -1204,6 +1245,7 @@ const ExcalidrawWrapper = () => {
           theme={appTheme}
           refresh={() => forceRefresh((prev) => !prev)}
           onOpenDashboard={() => setIsDashboardOpen(true)}
+          onNewDrawing={() => setShowNewDrawingDialog(true)}
           onInsertPdf={() => pdfInputRef.current?.click()}
           onOpenSupabaseAuth={() => setIsAuthModalOpen(true)}
         />
@@ -1497,6 +1539,13 @@ const ExcalidrawWrapper = () => {
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
       />
+
+      {showNewDrawingDialog && (
+        <NewDrawingDialog
+          onConfirm={handleNewDrawingConfirm}
+          onCancel={() => setShowNewDrawingDialog(false)}
+        />
+      )}
 
       {pdfProgress && (
         <div
