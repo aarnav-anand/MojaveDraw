@@ -8,11 +8,24 @@ import {
   saveDocumentToSupabase,
   fetchDocumentsFromSupabase,
   deleteDocumentFromSupabase,
+  fetchFoldersFromSupabase,
+  saveFolderToSupabase,
+  deleteFolderFromSupabase,
 } from "./supabase";
+
+export interface FolderItem {
+  id: string;
+  name: string;
+  parentId: string | null; // null if top-level / root
+  createdAt: number;
+  updatedAt: number;
+  syncedToCloud?: boolean;
+}
 
 export interface DocumentMetadata {
   id: string;
   title: string;
+  folderId?: string | null; // null if root
   thumbnail?: string;
   createdAt: number;
   updatedAt: number;
@@ -27,11 +40,37 @@ export interface ExcalidrawDoc extends DocumentMetadata {
 
 const docsStore = createStore("excalidraw-documents-db", "documents");
 const metaStore = createStore("excalidraw-documents-db", "documents-meta");
+const foldersStore = createStore("excalidraw-documents-db", "folders");
 
 const ACTIVE_DOC_STORAGE_KEY = "excalidraw_active_doc_id";
 
+// Store change subscribers
+type StoreListener = () => void;
+const listeners = new Set<StoreListener>();
+
+export const subscribeToStoreChanges = (listener: StoreListener) => {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+};
+
+export const notifyStoreChanged = () => {
+  listeners.forEach((cb) => {
+    try {
+      cb();
+    } catch (e) {
+      console.error("Store listener error:", e);
+    }
+  });
+};
+
 export const generateDocId = (): string => {
   return "doc_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+};
+
+export const generateFolderId = (): string => {
+  return "fld_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
 };
 
 export const getActiveDocIdFromUrl = (): string | null => {
@@ -68,11 +107,155 @@ export const getActiveDocumentId = (): string => {
   return fromStorage || "default";
 };
 
-/**
- * Migrates existing data from window.localStorage to IndexedDB.
- * This frees up the 5MB browser localStorage and resolves the
- * "Browser storage quota exceeded" issue permanently.
- */
+// ---------------------------------------------------------------------------
+// FOLDERS MANAGEMENT
+// ---------------------------------------------------------------------------
+
+export const listFolders = async (): Promise<FolderItem[]> => {
+  try {
+    const localFolders: FolderItem[] = [];
+    const folderEntries = await entries(foldersStore);
+    for (const [, value] of folderEntries) {
+      if (value && typeof value === "object") {
+        localFolders.push(value as FolderItem);
+      }
+    }
+
+    if (isSupabaseConfigured) {
+      const user = await getSupabaseUser();
+      if (user) {
+        const cloudFolders = await fetchFoldersFromSupabase();
+        const mergedMap = new Map<string, FolderItem>();
+
+        for (const f of localFolders) {
+          mergedMap.set(f.id, f);
+        }
+
+        for (const cf of cloudFolders) {
+          const cfUpdatedAt = new Date(cf.updated_at).getTime();
+          const existing = mergedMap.get(cf.id);
+
+          if (!existing || cfUpdatedAt >= existing.updatedAt) {
+            const item: FolderItem = {
+              id: cf.id,
+              name: cf.name,
+              parentId: cf.parent_id || null,
+              createdAt: new Date(cf.created_at).getTime(),
+              updatedAt: cfUpdatedAt,
+              syncedToCloud: true,
+            };
+            mergedMap.set(cf.id, item);
+            await set(cf.id, item, foldersStore);
+          }
+        }
+
+        const mergedList = Array.from(mergedMap.values());
+        mergedList.sort((a, b) => a.name.localeCompare(b.name));
+        return mergedList;
+      }
+    }
+
+    localFolders.sort((a, b) => a.name.localeCompare(b.name));
+    return localFolders;
+  } catch (error) {
+    console.error("Failed to list folders:", error);
+    return [];
+  }
+};
+
+export const createFolder = async (
+  name: string,
+  parentId?: string | null,
+): Promise<FolderItem> => {
+  const id = generateFolderId();
+  const folder: FolderItem = {
+    id,
+    name: name.trim() || "New Folder",
+    parentId: parentId || null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  await set(folder.id, folder, foldersStore);
+
+  if (isSupabaseConfigured) {
+    saveFolderToSupabase({
+      id: folder.id,
+      name: folder.name,
+      parent_id: folder.parentId,
+    }).then((ok) => {
+      if (ok) {
+        folder.syncedToCloud = true;
+        set(folder.id, folder, foldersStore);
+      }
+    });
+  }
+
+  notifyStoreChanged();
+  return folder;
+};
+
+export const saveFolder = async (folder: FolderItem): Promise<void> => {
+  try {
+    const updated: FolderItem = {
+      ...folder,
+      updatedAt: Date.now(),
+    };
+    await set(updated.id, updated, foldersStore);
+
+    if (isSupabaseConfigured) {
+      saveFolderToSupabase({
+        id: updated.id,
+        name: updated.name,
+        parent_id: updated.parentId,
+      }).then((ok) => {
+        if (ok) {
+          updated.syncedToCloud = true;
+          set(updated.id, updated, foldersStore);
+        }
+      });
+    }
+    notifyStoreChanged();
+  } catch (error) {
+    console.error("Failed to save folder:", error);
+  }
+};
+
+export const deleteFolder = async (id: string): Promise<boolean> => {
+  try {
+    // 1. Delete folder from local IDB
+    await del(id, foldersStore);
+
+    // 2. Unassign or delete sub-items
+    const allFolders = await listFolders();
+    const childFolders = allFolders.filter((f) => f.parentId === id);
+    for (const child of childFolders) {
+      await deleteFolder(child.id);
+    }
+
+    const allDocs = await listDocuments();
+    const childDocs = allDocs.filter((d) => d.folderId === id);
+    for (const doc of childDocs) {
+      await moveDocumentToFolder(doc.id, null);
+    }
+
+    // 3. Supabase delete
+    if (isSupabaseConfigured) {
+      deleteFolderFromSupabase(id).catch(console.error);
+    }
+
+    notifyStoreChanged();
+    return true;
+  } catch (error) {
+    console.error("Failed to delete folder:", error);
+    return false;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// DOCUMENTS MANAGEMENT
+// ---------------------------------------------------------------------------
+
 export const migrateFromLocalStorageIfNeeded = async (): Promise<ExcalidrawDoc | null> => {
   try {
     const rawElements = localStorage.getItem(STORAGE_KEYS.LOCAL_STORAGE_ELEMENTS);
@@ -84,7 +267,7 @@ export const migrateFromLocalStorageIfNeeded = async (): Promise<ExcalidrawDoc |
 
       const defaultDoc: ExcalidrawDoc = {
         id: "default",
-        title: "My First Drawing",
+        title: appState.name || "My First Drawing",
         elements: Array.isArray(elements) ? elements : [],
         appState: appState || {},
         createdAt: Date.now(),
@@ -93,7 +276,6 @@ export const migrateFromLocalStorageIfNeeded = async (): Promise<ExcalidrawDoc |
 
       await saveDocument(defaultDoc);
 
-      // Clear legacy localStorage keys to free up the 5MB quota!
       try {
         localStorage.removeItem(STORAGE_KEYS.LOCAL_STORAGE_ELEMENTS);
         localStorage.removeItem(STORAGE_KEYS.LOCAL_STORAGE_APP_STATE);
@@ -111,7 +293,7 @@ export const migrateFromLocalStorageIfNeeded = async (): Promise<ExcalidrawDoc |
 
 export const listDocuments = async (): Promise<DocumentMetadata[]> => {
   try {
-    // 1. Fetch from local IndexedDB
+    // 1. Fetch from local IndexedDB metaStore
     const localMetas: DocumentMetadata[] = [];
     const metaEntries = await entries(metaStore);
     for (const [, value] of metaEntries) {
@@ -120,8 +302,24 @@ export const listDocuments = async (): Promise<DocumentMetadata[]> => {
       }
     }
 
-    // Sort descending by updated time
-    localMetas.sort((a, b) => b.updatedAt - a.updatedAt);
+    // Ensure "default" document is indexed if it exists in docsStore
+    const hasDefault = localMetas.some((m) => m.id === "default");
+    if (!hasDefault) {
+      const defaultDoc = await get<ExcalidrawDoc>("default", docsStore);
+      if (defaultDoc) {
+        const meta: DocumentMetadata = {
+          id: defaultDoc.id,
+          title: defaultDoc.title || "My First Drawing",
+          folderId: defaultDoc.folderId || null,
+          thumbnail: defaultDoc.thumbnail,
+          createdAt: defaultDoc.createdAt,
+          updatedAt: defaultDoc.updatedAt,
+          syncedToCloud: defaultDoc.syncedToCloud,
+        };
+        await set("default", meta, metaStore);
+        localMetas.push(meta);
+      }
+    }
 
     // 2. If Supabase is connected and user is logged in, merge cloud documents
     if (isSupabaseConfigured) {
@@ -138,17 +336,17 @@ export const listDocuments = async (): Promise<DocumentMetadata[]> => {
           const cloudUpdatedAt = new Date(cloudDoc.updated_at).getTime();
           const existing = mergedMap.get(cloudDoc.id);
 
-          if (!existing || cloudUpdatedAt > existing.updatedAt) {
+          if (!existing || cloudUpdatedAt >= existing.updatedAt) {
             const meta: DocumentMetadata = {
               id: cloudDoc.id,
               title: cloudDoc.title,
+              folderId: cloudDoc.folder_id || null,
               thumbnail: cloudDoc.thumbnail_url || undefined,
               createdAt: new Date(cloudDoc.created_at).getTime(),
               updatedAt: cloudUpdatedAt,
               syncedToCloud: true,
             };
             mergedMap.set(cloudDoc.id, meta);
-            // Cache to local meta store as well
             await set(cloudDoc.id, meta, metaStore);
           }
         }
@@ -159,6 +357,7 @@ export const listDocuments = async (): Promise<DocumentMetadata[]> => {
       }
     }
 
+    localMetas.sort((a, b) => b.updatedAt - a.updatedAt);
     return localMetas;
   } catch (error) {
     console.error("Failed to list documents:", error);
@@ -178,13 +377,13 @@ export const loadDocument = async (id: string): Promise<ExcalidrawDoc | null> =>
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
       if (user) {
-        const cloudDoc = await fetchDocumentsFromSupabase().then((docs) =>
-          docs.find((d) => d.id === id),
-        );
+        const cloudDocs = await fetchDocumentsFromSupabase();
+        const cloudDoc = cloudDocs.find((d) => d.id === id);
         if (cloudDoc) {
           const doc: ExcalidrawDoc = {
             id: cloudDoc.id,
             title: cloudDoc.title,
+            folderId: cloudDoc.folder_id || null,
             elements: cloudDoc.elements,
             appState: cloudDoc.app_state,
             thumbnail: cloudDoc.thumbnail_url || undefined,
@@ -220,9 +419,23 @@ export const saveDocument = async (
   try {
     const existing = (await get<ExcalidrawDoc>(doc.id, docsStore)) || null;
 
+    const resolvedTitle =
+      doc.title?.trim() ||
+      (doc.appState as any)?.name?.trim() ||
+      existing?.title?.trim() ||
+      "Untitled Drawing";
+
+    const resolvedFolderId =
+      doc.folderId !== undefined
+        ? doc.folderId
+        : existing?.folderId !== undefined
+        ? existing.folderId
+        : null;
+
     const fullDoc: ExcalidrawDoc = {
       id: doc.id,
-      title: doc.title || existing?.title || "Untitled Drawing",
+      title: resolvedTitle,
+      folderId: resolvedFolderId,
       elements: doc.elements || existing?.elements || [],
       appState: doc.appState || existing?.appState || {},
       thumbnail: doc.thumbnail !== undefined ? doc.thumbnail : existing?.thumbnail,
@@ -239,6 +452,7 @@ export const saveDocument = async (
     const meta: DocumentMetadata = {
       id: fullDoc.id,
       title: fullDoc.title,
+      folderId: fullDoc.folderId,
       thumbnail: fullDoc.thumbnail,
       createdAt: fullDoc.createdAt,
       updatedAt: fullDoc.updatedAt,
@@ -253,6 +467,7 @@ export const saveDocument = async (
           saveDocumentToSupabase({
             id: fullDoc.id,
             title: fullDoc.title,
+            folderId: fullDoc.folderId,
             elements: fullDoc.elements,
             appState: fullDoc.appState,
             thumbnail: fullDoc.thumbnail,
@@ -268,23 +483,38 @@ export const saveDocument = async (
         }
       });
     }
+
+    notifyStoreChanged();
   } catch (error) {
     console.error("Failed to save document:", error);
   }
 };
 
-export const createDocument = async (title?: string): Promise<ExcalidrawDoc> => {
+export const createDocument = async (
+  title?: string,
+  folderId?: string | null,
+): Promise<ExcalidrawDoc> => {
   const id = generateDocId();
+  const cleanTitle = title?.trim() || "Untitled Drawing";
   const doc: ExcalidrawDoc = {
     id,
-    title: title || "Untitled Drawing",
+    title: cleanTitle,
+    folderId: folderId || null,
     elements: [],
-    appState: {},
+    appState: { name: cleanTitle },
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
   await saveDocument(doc);
+  notifyStoreChanged();
   return doc;
+};
+
+export const moveDocumentToFolder = async (
+  docId: string,
+  folderId: string | null,
+): Promise<void> => {
+  await saveDocument({ id: docId, folderId });
 };
 
 export const duplicateDocument = async (id: string): Promise<ExcalidrawDoc | null> => {
@@ -297,11 +527,13 @@ export const duplicateDocument = async (id: string): Promise<ExcalidrawDoc | nul
     ...source,
     id: newId,
     title: `${source.title} (Copy)`,
+    folderId: source.folderId || null,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     syncedToCloud: false,
   };
   await saveDocument(newDoc);
+  notifyStoreChanged();
   return newDoc;
 };
 
@@ -313,6 +545,7 @@ export const deleteDocument = async (id: string): Promise<boolean> => {
     if (isSupabaseConfigured) {
       deleteDocumentFromSupabase(id).catch(console.error);
     }
+    notifyStoreChanged();
     return true;
   } catch (error) {
     console.error("Failed to delete document:", error);

@@ -8,6 +8,7 @@ import {
   deleteDocument,
   getActiveDocumentId,
   setActiveDocIdToUrl,
+  subscribeToStoreChanges,
 } from "../data/documentStore";
 import type { DocumentMetadata } from "../data/documentStore";
 import {
@@ -131,6 +132,10 @@ export const DocumentsDashboard: React.FC<DocumentsDashboardProps> = ({
   useEffect(() => {
     if (isOpen) {
       fetchDocs();
+      const unsubscribe = subscribeToStoreChanges(() => {
+        fetchDocs();
+      });
+      return () => unsubscribe();
     }
   }, [isOpen, fetchDocs]);
 

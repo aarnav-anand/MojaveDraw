@@ -156,3 +156,29 @@
     --plus-banner-subtitle: #8f8cc4;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Global Google Sans Typography & Theme Consistency
+// ---------------------------------------------------------------------------
+:root {
+  --app-font-family: 'Google Sans', 'Google Sans Text', 'Product Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --color-primary: #6965db;
+  --color-primary-darker: #5651c8;
+  --color-primary-light: #eef2ff;
+}
+
+body, html, #root, button, input, select, textarea {
+  font-family: var(--app-font-family) !important;
+}
+
+.excalidraw {
+  font-family: var(--app-font-family);
+
+  .ExcButton,
+  .dropdown-menu-item,
+  .Island,
+  .Modal,
+  .Dialog {
+    font-family: var(--app-font-family);
+  }
+}

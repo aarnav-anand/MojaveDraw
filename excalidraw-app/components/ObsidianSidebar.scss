@@ -1,0 +1,486 @@
+// ==============================================================================
+// Obsidian-inspired File Explorer Sidebar Styling
+// Theme: Bluish accents + Google Sans font
+// ==============================================================================
+
+.obsidian-app-container {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  font-family: 'Google Sans', 'Google Sans Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.obsidian-main-area {
+  flex: 1;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+
+.obsidian-sidebar-collapsed {
+  width: 36px;
+  height: 100%;
+  background: var(--island-bg-color, #ffffff);
+  border-right: 1px solid var(--default-border-color, #e0e0e0);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 12px;
+  z-index: 10;
+  flex-shrink: 0;
+  transition: width 0.2s ease;
+
+  .btn-expand-sidebar {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 4px;
+    border-radius: 6px;
+    color: var(--color-primary, #6965db);
+    font-size: 1.1rem;
+    font-weight: 700;
+    transition: background 0.15s ease, transform 0.15s ease;
+
+    &:hover {
+      background: var(--button-gray-1, #f1f3f5);
+      transform: scale(1.05);
+    }
+  }
+}
+
+.obsidian-sidebar {
+  width: 270px;
+  min-width: 220px;
+  max-width: 380px;
+  height: 100%;
+  background: var(--island-bg-color, #fcfcfd);
+  color: var(--text-primary-color, #1e1e1e);
+  border-right: 1px solid var(--default-border-color, #e4e7eb);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  z-index: 10;
+  user-select: none;
+  transition: all 0.2s ease;
+
+  // Header
+  .obsidian-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--default-border-color, #eaedf0);
+
+    .vault-brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 0.95rem;
+      letter-spacing: -0.2px;
+      color: var(--color-primary, #6965db);
+
+      .brand-icon {
+        font-size: 1.15rem;
+      }
+    }
+
+    .header-icon-actions {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+
+      .header-action-btn {
+        background: transparent;
+        border: none;
+        color: var(--text-secondary-color, #6c757d);
+        width: 26px;
+        height: 26px;
+        border-radius: 5px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        font-size: 0.85rem;
+        transition: background 0.12s ease, color 0.12s ease;
+
+        svg {
+          width: 14px;
+          height: 14px;
+        }
+
+        &:hover {
+          background: var(--button-gray-1, #e9ecef);
+          color: var(--color-primary, #6965db);
+        }
+      }
+    }
+  }
+
+  // Search box
+  .obsidian-search-bar {
+    margin: 8px 12px;
+    background: var(--input-bg-color, #f1f3f5);
+    border: 1px solid var(--default-border-color, #dee2e6);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    padding: 4px 8px;
+    gap: 6px;
+
+    .search-icon {
+      color: #868e96;
+      display: flex;
+      align-items: center;
+
+      svg {
+        width: 13px;
+        height: 13px;
+      }
+    }
+
+    input {
+      border: none;
+      background: transparent;
+      outline: none;
+      width: 100%;
+      font-size: 0.82rem;
+      font-family: inherit;
+      color: var(--text-primary-color, #212529);
+
+      &::placeholder {
+        color: #adb5bd;
+      }
+    }
+
+    .clear-search-btn {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      color: #adb5bd;
+      font-size: 0.75rem;
+      padding: 0;
+
+      &:hover {
+        color: #495057;
+      }
+    }
+  }
+
+  // Tree container
+  .obsidian-tree-container {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 4px 6px;
+
+    &::-webkit-scrollbar {
+      width: 4px;
+    }
+    &::-webkit-scrollbar-thumb {
+      background: rgba(0, 0, 0, 0.15);
+      border-radius: 4px;
+    }
+
+    .empty-tree-state {
+      padding: 30px 16px;
+      text-align: center;
+      color: var(--text-secondary-color, #868e96);
+      font-size: 0.85rem;
+
+      p {
+        margin: 0 0 10px;
+      }
+
+      .btn-create-first {
+        background: var(--color-primary, #6965db);
+        color: #ffffff;
+        border: none;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 0.82rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+    }
+  }
+
+  // Row items (folders & documents)
+  .obsidian-item-row {
+    display: flex;
+    align-items: center;
+    height: 30px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.84rem;
+    gap: 6px;
+    padding-right: 6px;
+    position: relative;
+    transition: background 0.1s ease, color 0.1s ease;
+    margin-bottom: 1px;
+
+    &:hover {
+      background: var(--button-gray-1, #f1f3f5);
+
+      .item-hover-actions {
+        display: flex;
+      }
+    }
+
+    &.active-doc {
+      background: var(--color-primary-light, #eef2ff);
+      color: var(--color-primary-darker, #5651c8);
+      font-weight: 600;
+      border-left: 3px solid var(--color-primary, #6965db);
+
+      .doc-icon {
+        color: var(--color-primary, #6965db);
+      }
+    }
+
+    .folder-chevron {
+      font-size: 0.85rem;
+      width: 14px;
+      display: inline-block;
+      text-align: center;
+      color: var(--text-secondary-color, #868e96);
+    }
+
+    .folder-icon,
+    .doc-icon {
+      font-size: 0.95rem;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    .item-title {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: inherit;
+    }
+
+    .cloud-indicator {
+      font-size: 0.72rem;
+      opacity: 0.8;
+      flex-shrink: 0;
+    }
+
+    .inline-rename-input {
+      flex: 1;
+      font-size: 0.82rem;
+      padding: 1px 4px;
+      border: 1.5px solid var(--color-primary, #6965db);
+      border-radius: 4px;
+      background: var(--island-bg-color, #ffffff);
+      color: var(--text-primary-color, #1e1e1e);
+      outline: none;
+    }
+
+    .item-hover-actions {
+      display: none;
+      align-items: center;
+      gap: 2px;
+      margin-left: auto;
+      flex-shrink: 0;
+
+      .action-btn {
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        padding: 2px 4px;
+        border-radius: 4px;
+        color: var(--text-secondary-color, #868e96);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.78rem;
+
+        svg {
+          width: 12px;
+          height: 12px;
+        }
+
+        &:hover {
+          background: rgba(0, 0, 0, 0.08);
+          color: var(--text-primary-color, #212529);
+        }
+
+        &.delete-btn:hover {
+          background: #ffe3e3;
+          color: #e03131;
+        }
+      }
+    }
+  }
+
+  .obsidian-folder-children {
+    display: flex;
+    flex-direction: column;
+  }
+
+  // Footer profile section
+  .obsidian-footer {
+    padding: 10px 12px;
+    border-top: 1px solid var(--default-border-color, #eaedf0);
+    background: var(--island-bg-color, #fcfcfd);
+
+    .user-profile-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      padding: 6px 8px;
+      border-radius: 8px;
+      transition: background 0.15s ease;
+
+      &:hover {
+        background: var(--button-gray-1, #f1f3f5);
+      }
+
+      .user-avatar {
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        background: var(--color-primary, #6965db);
+        color: #ffffff;
+        font-weight: 700;
+        font-size: 0.85rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+
+      .user-details {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+
+        .user-email {
+          font-size: 0.82rem;
+          font-weight: 600;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .user-status {
+          font-size: 0.72rem;
+          color: #2b8a3e;
+          font-weight: 500;
+        }
+      }
+    }
+
+    .btn-sidebar-auth {
+      width: 100%;
+      background: var(--color-primary-light, #eef2ff);
+      border: 1px solid var(--color-primary, #6965db);
+      color: var(--color-primary-darker, #5651c8);
+      padding: 7px 12px;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background 0.15s ease;
+
+      &:hover {
+        background: var(--color-primary, #6965db);
+        color: #ffffff;
+      }
+    }
+  }
+}
+
+// Modal for creating a new folder
+.folder-prompt-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(3px);
+  z-index: 1250;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  .folder-prompt-dialog {
+    background: var(--island-bg-color, #ffffff);
+    color: var(--text-primary-color, #1e1e1e);
+    border-radius: 12px;
+    padding: 24px;
+    width: 360px;
+    max-width: 90vw;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.22);
+    border: 1px solid var(--default-border-color, #dee2e6);
+
+    h4 {
+      margin: 0 0 14px;
+      font-size: 1.1rem;
+      font-weight: 700;
+    }
+
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 9px 12px;
+      border: 1.5px solid var(--default-border-color, #dee2e6);
+      border-radius: 7px;
+      font-size: 0.92rem;
+      outline: none;
+      background: var(--input-bg-color, #f8f9fa);
+      color: inherit;
+      margin-bottom: 16px;
+
+      &:focus {
+        border-color: var(--color-primary, #6965db);
+      }
+    }
+
+    .prompt-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+
+      .btn-cancel {
+        background: transparent;
+        border: 1px solid var(--default-border-color, #dee2e6);
+        color: var(--text-secondary-color, #868e96);
+        padding: 6px 14px;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        cursor: pointer;
+
+        &:hover {
+          background: var(--button-gray-1, #f1f3f5);
+        }
+      }
+
+      .btn-confirm {
+        background: var(--color-primary, #6965db);
+        color: #ffffff;
+        border: none;
+        padding: 6px 16px;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+
+        &:hover {
+          background: var(--color-primary-darker, #5651c8);
+        }
+      }
+    }
+  }
+}

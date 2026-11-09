@@ -91,6 +91,7 @@ const saveDataStateToLocalStorage = (
     // 1. High-capacity persistence via IndexedDB (eliminates 5MB localStorage threshold)
     saveDocument({
       id: activeDocId,
+      title: _appState.name || undefined,
       elements: nonDeletedElements,
       appState: _appState,
     });

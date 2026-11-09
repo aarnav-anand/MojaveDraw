@@ -3,10 +3,20 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import type { ExcalidrawElement } from "@excalidraw/element/types";
 import type { AppState, BinaryFileData, BinaryFiles } from "@excalidraw/excalidraw/types";
 
+export interface SupabaseFolderRecord {
+  id: string;
+  user_id: string;
+  name: string;
+  parent_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface SupabaseDocumentRecord {
   id: string;
   user_id: string;
   title: string;
+  folder_id?: string | null;
   elements: readonly ExcalidrawElement[];
   app_state: Partial<AppState>;
   thumbnail_url?: string | null;
@@ -94,6 +104,7 @@ export const uploadFileToSupabaseStorage = async (
 export const saveDocumentToSupabase = async (doc: {
   id: string;
   title: string;
+  folderId?: string | null;
   elements: readonly ExcalidrawElement[];
   appState: Partial<AppState>;
   thumbnail?: string;
@@ -118,18 +129,28 @@ export const saveDocumentToSupabase = async (doc: {
       await Promise.all(uploadPromises);
     }
 
-    const { error } = await supabase.from("documents").upsert(
-      {
-        id: doc.id,
-        user_id: user.id,
-        title: doc.title || "Untitled Drawing",
-        elements: doc.elements,
-        app_state: doc.appState,
-        thumbnail_url: doc.thumbnail || null,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "id" },
-    );
+    const payload: any = {
+      id: doc.id,
+      user_id: user.id,
+      title: doc.title || "Untitled Drawing",
+      elements: doc.elements,
+      app_state: doc.appState,
+      thumbnail_url: doc.thumbnail || null,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (doc.folderId !== undefined) {
+      payload.folder_id = doc.folderId;
+    }
+
+    let { error } = await supabase.from("documents").upsert(payload, { onConflict: "id" });
+
+    // Fallback if folder_id column doesn't exist yet in Supabase
+    if (error && error.message?.includes("folder_id")) {
+      delete payload.folder_id;
+      const retry = await supabase.from("documents").upsert(payload, { onConflict: "id" });
+      error = retry.error;
+    }
 
     if (error) {
       console.error("Error saving document to Supabase:", error);
@@ -152,10 +173,20 @@ export const fetchDocumentsFromSupabase = async (): Promise<SupabaseDocumentReco
       return [];
     }
 
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("documents")
-      .select("id, user_id, title, elements, app_state, thumbnail_url, created_at, updated_at")
+      .select("id, user_id, title, folder_id, elements, app_state, thumbnail_url, created_at, updated_at")
       .order("updated_at", { ascending: false });
+
+    // Fallback if folder_id does not exist in schema yet
+    if (error && error.message?.includes("folder_id")) {
+      const fallback = await supabase
+        .from("documents")
+        .select("id, user_id, title, elements, app_state, thumbnail_url, created_at, updated_at")
+        .order("updated_at", { ascending: false });
+      data = fallback.data as any;
+      error = fallback.error;
+    }
 
     if (error || !data) {
       console.error("Error fetching documents from Supabase:", error);
@@ -165,6 +196,86 @@ export const fetchDocumentsFromSupabase = async (): Promise<SupabaseDocumentReco
   } catch (err) {
     console.error("Exception fetching documents from Supabase:", err);
     return [];
+  }
+};
+
+export const fetchFoldersFromSupabase = async (): Promise<SupabaseFolderRecord[]> => {
+  if (!supabase) {
+    return [];
+  }
+  try {
+    const user = await getSupabaseUser();
+    if (!user) {
+      return [];
+    }
+
+    const { data, error } = await supabase
+      .from("folders")
+      .select("*")
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      // Table might not exist yet if user hasn't run the migration
+      console.warn("Could not fetch folders from Supabase (may need schema update):", error.message);
+      return [];
+    }
+    return (data || []) as SupabaseFolderRecord[];
+  } catch (err) {
+    console.warn("Exception fetching folders from Supabase:", err);
+    return [];
+  }
+};
+
+export const saveFolderToSupabase = async (folder: {
+  id: string;
+  name: string;
+  parent_id?: string | null;
+}): Promise<boolean> => {
+  if (!supabase) {
+    return false;
+  }
+  try {
+    const user = await getSupabaseUser();
+    if (!user) {
+      return false;
+    }
+
+    const { error } = await supabase.from("folders").upsert(
+      {
+        id: folder.id,
+        user_id: user.id,
+        name: folder.name,
+        parent_id: folder.parent_id || null,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "id" },
+    );
+
+    if (error) {
+      console.warn("Error saving folder to Supabase:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn("Exception saving folder to Supabase:", err);
+    return false;
+  }
+};
+
+export const deleteFolderFromSupabase = async (id: string): Promise<boolean> => {
+  if (!supabase) {
+    return false;
+  }
+  try {
+    const { error } = await supabase.from("folders").delete().eq("id", id);
+    if (error) {
+      console.warn("Error deleting folder from Supabase:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn("Exception deleting folder from Supabase:", err);
+    return false;
   }
 };
 

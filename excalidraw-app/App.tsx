@@ -149,7 +149,9 @@ import "./index.scss";
 import { ExcalidrawPlusPromoBanner } from "./components/ExcalidrawPlusPromoBanner";
 import { AppSidebar } from "./components/AppSidebar";
 import { DocumentsDashboard, NewDrawingDialog } from "./components/DocumentsDashboard";
+import { ObsidianSidebar } from "./components/ObsidianSidebar";
 import { SupabaseAuthModal } from "./components/SupabaseAuthModal";
+import { isSupabaseConfigured, getSupabaseUser } from "./data/supabase";
 import { insertPdfIntoCanvas } from "./data/pdfImporter";
 import type { PdfImportProgress } from "./data/pdfImporter";
 import {
@@ -493,6 +495,10 @@ const ExcalidrawWrapper = () => {
   // collab room
   useSimulatedCollaborators(excalidrawAPI);
 
+  const [activeDocId, setActiveDocId] = useState<string>(() => getActiveDocumentId());
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [newDrawingFolderId, setNewDrawingFolderId] = useState<string | null>(null);
+
   const [isDashboardOpen, setIsDashboardOpen] = useState(() => {
     return (
       typeof window !== "undefined" &&
@@ -506,6 +512,17 @@ const ExcalidrawWrapper = () => {
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const appContainerRef = useRef<HTMLDivElement>(null);
 
+  // Off the bat: prompt user to sign in if not authenticated yet
+  useEffect(() => {
+    if (isSupabaseConfigured) {
+      getSupabaseUser().then((user) => {
+        if (!user) {
+          setIsAuthModalOpen(true);
+        }
+      });
+    }
+  }, []);
+
   useEffect(() => {
     const onHashChange = () => {
       if (
@@ -514,6 +531,8 @@ const ExcalidrawWrapper = () => {
       ) {
         setIsDashboardOpen(true);
       }
+      const currentDocId = getActiveDocumentId();
+      setActiveDocId(currentDocId);
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
@@ -561,9 +580,51 @@ const ExcalidrawWrapper = () => {
   );
 
   /**
-   * Called when the user wants to start a fresh drawing from the main app
-   * (hamburger menu → "New Drawing"). Shows the naming dialog, then creates
-   * the document, switches the canvas to it, and syncs to Supabase.
+   * Switch active document from the Obsidian sidebar or dashboard
+   */
+  const handleSwitchDocument = useCallback(
+    async (targetId: string) => {
+      if (!excalidrawAPI) {
+        return;
+      }
+      const currentDocId = getActiveDocumentId();
+      if (targetId === currentDocId) {
+        return;
+      }
+
+      // Save current active document before switching away
+      await saveDocument({
+        id: currentDocId,
+        title: excalidrawAPI.getName() || undefined,
+        elements: excalidrawAPI.getSceneElements(),
+        appState: excalidrawAPI.getAppState(),
+        files: excalidrawAPI.getFiles(),
+      });
+
+      const doc = await loadDocument(targetId);
+      if (doc) {
+        setActiveDocIdToUrl(targetId);
+        setActiveDocId(targetId);
+
+        if (doc.files) {
+          excalidrawAPI.addFiles(Object.values(doc.files));
+        }
+
+        excalidrawAPI.updateScene({
+          elements: doc.elements || [],
+          appState: {
+            ...doc.appState,
+            name: doc.title,
+          } as any,
+        });
+      }
+    },
+    [excalidrawAPI],
+  );
+
+  /**
+   * Called when the user confirms a drawing name (creates the document,
+   * associates with optional folder, switches the canvas, and syncs to Supabase).
    */
   const handleNewDrawingConfirm = useCallback(
     async (name: string) => {
@@ -573,17 +634,20 @@ const ExcalidrawWrapper = () => {
       }
 
       // Persist current canvas before switching
-      const activeDocId = getActiveDocumentId();
+      const currentDocId = getActiveDocumentId();
       await saveDocument({
-        id: activeDocId,
+        id: currentDocId,
+        title: excalidrawAPI.getName() || undefined,
         elements: excalidrawAPI.getSceneElements(),
         appState: excalidrawAPI.getAppState(),
         files: excalidrawAPI.getFiles(),
       });
 
-      // Create the new named document (saveDocument inside pushes to Supabase)
-      const newDoc = await createDocument(name);
+      // Create the new named document in the chosen folder
+      const newDoc = await createDocument(name, newDrawingFolderId);
       setActiveDocIdToUrl(newDoc.id);
+      setActiveDocId(newDoc.id);
+      setNewDrawingFolderId(null);
 
       excalidrawAPI.resetScene();
       excalidrawAPI.updateScene({
@@ -591,7 +655,7 @@ const ExcalidrawWrapper = () => {
         appState: { name: newDoc.title },
       });
     },
-    [excalidrawAPI],
+    [excalidrawAPI, newDrawingFolderId],
   );
 
   // ---------------------------------------------------------------------------
@@ -1080,29 +1144,44 @@ const ExcalidrawWrapper = () => {
   };
 
   return (
-    <div
-      ref={appContainerRef}
-      style={{ height: "100%" }}
-      className={clsx("excalidraw-app", {
-        "is-collaborating": isCollaborating,
-      })}
-      onDragOver={(e) => {
-        if (e.dataTransfer.types.includes("Files")) {
-          e.preventDefault();
-        }
-      }}
-      onDrop={async (e) => {
-        const file = e.dataTransfer.files?.[0];
-        if (
-          file &&
-          (file.type === "application/pdf" || file.name.endsWith(".pdf"))
-        ) {
-          e.preventDefault();
-          e.stopPropagation();
-          await handlePdfImport(file);
-        }
-      }}
-    >
+    <div className="obsidian-app-container">
+      <ObsidianSidebar
+        activeDocId={activeDocId}
+        onSelectDoc={handleSwitchDocument}
+        onRequestNewDrawing={(folderId) => {
+          setNewDrawingFolderId(folderId || null);
+          setShowNewDrawingDialog(true);
+        }}
+        onOpenDashboard={() => setIsDashboardOpen(true)}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        isCollapsed={isSidebarCollapsed}
+        onToggleCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
+      />
+
+      <main className="obsidian-main-area">
+        <div
+          ref={appContainerRef}
+          style={{ height: "100%" }}
+          className={clsx("excalidraw-app", {
+            "is-collaborating": isCollaborating,
+          })}
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes("Files")) {
+              e.preventDefault();
+            }
+          }}
+          onDrop={async (e) => {
+            const file = e.dataTransfer.files?.[0];
+            if (
+              file &&
+              (file.type === "application/pdf" || file.name.endsWith(".pdf"))
+            ) {
+              e.preventDefault();
+              e.stopPropagation();
+              await handlePdfImport(file);
+            }
+          }}
+        >
       <Excalidraw
         onPaste={onPaste}
         viewportStatusFrame={viewportStatusFrame}
@@ -1574,6 +1653,8 @@ const ExcalidrawWrapper = () => {
         </div>
       )}
     </div>
+    </main>
+  </div>
   );
 };
 
