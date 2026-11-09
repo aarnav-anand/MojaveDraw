@@ -148,6 +148,11 @@ import "./index.scss";
 
 import { ExcalidrawPlusPromoBanner } from "./components/ExcalidrawPlusPromoBanner";
 import { AppSidebar } from "./components/AppSidebar";
+import { DocumentsDashboard } from "./components/DocumentsDashboard";
+import { SupabaseAuthModal } from "./components/SupabaseAuthModal";
+import { insertPdfIntoCanvas } from "./data/pdfImporter";
+import type { PdfImportProgress } from "./data/pdfImporter";
+import { getActiveDocumentId, loadDocument } from "./data/documentStore";
 
 import type { CollabAPI } from "./collab/Collab";
 
@@ -230,7 +235,17 @@ const initializeScene = async (opts: {
   );
   const externalUrlMatch = window.location.hash.match(/^#url=(.*)$/);
 
-  const localDataState = importFromLocalStorage();
+  const activeDocId = getActiveDocumentId();
+  const currentDoc = await loadDocument(activeDocId);
+  if (currentDoc?.files && opts.excalidrawAPI) {
+    opts.excalidrawAPI.addFiles(Object.values(currentDoc.files));
+  }
+  const localDataState = currentDoc
+    ? {
+        elements: currentDoc.elements,
+        appState: { ...currentDoc.appState, name: currentDoc.title },
+      }
+    : importFromLocalStorage();
 
   let scene: Omit<
     RestoredDataState,
@@ -472,6 +487,72 @@ const ExcalidrawWrapper = () => {
   // collab room
   useSimulatedCollaborators(excalidrawAPI);
 
+  const [isDashboardOpen, setIsDashboardOpen] = useState(() => {
+    return (
+      typeof window !== "undefined" &&
+      (window.location.hash === "#dashboard" ||
+        window.location.hash === "#files")
+    );
+  });
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [pdfProgress, setPdfProgress] = useState<PdfImportProgress | null>(null);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
+  const appContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      if (
+        window.location.hash === "#dashboard" ||
+        window.location.hash === "#files"
+      ) {
+        setIsDashboardOpen(true);
+      }
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  const handlePdfImport = useCallback(
+    async (file: File) => {
+      if (!excalidrawAPI) {
+        return;
+      }
+      const ownerDoc = appContainerRef.current?.ownerDocument || document;
+      try {
+        await insertPdfIntoCanvas(
+          excalidrawAPI,
+          ownerDoc,
+          file,
+          (progress) => setPdfProgress(progress),
+        );
+      } catch (err: any) {
+        console.error("Failed to insert PDF:", err);
+        setErrorMessage(err.message || "Failed to parse and insert PDF.");
+      } finally {
+        setPdfProgress(null);
+      }
+    },
+    [excalidrawAPI],
+  );
+
+  const onPaste = useCallback(
+    async (_data: any, event: ClipboardEvent | null) => {
+      const files = event?.clipboardData?.files;
+      if (files && files.length > 0) {
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
+            event?.preventDefault();
+            await handlePdfImport(file);
+            return false;
+          }
+        }
+      }
+      return true;
+    },
+    [handlePdfImport],
+  );
+
   // ---------------------------------------------------------------------------
   // Hoisted loadImages
   // ---------------------------------------------------------------------------
@@ -594,7 +675,7 @@ const ExcalidrawWrapper = () => {
       }
     };
 
-    const syncData = debounce(() => {
+    const syncData = debounce(async () => {
       if (isTestEnv()) {
         return;
       }
@@ -604,11 +685,22 @@ const ExcalidrawWrapper = () => {
       ) {
         // don't sync if local state is newer or identical to browser state
         if (isBrowserStorageStateNewer(STORAGE_KEYS.VERSION_DATA_STATE)) {
-          const localDataState = importFromLocalStorage();
+          const activeDocId = getActiveDocumentId();
+          const currentDoc = await loadDocument(activeDocId);
+          if (currentDoc?.files && excalidrawAPI) {
+            excalidrawAPI.addFiles(Object.values(currentDoc.files));
+          }
+          const localDataState = currentDoc
+            ? {
+                elements: currentDoc.elements,
+                appState: { ...currentDoc.appState, name: currentDoc.title },
+              }
+            : importFromLocalStorage();
           const username = importUsernameFromLocalStorage();
           setLangCode(getPreferredLanguage());
           excalidrawAPI.updateScene({
-            ...localDataState,
+            elements: localDataState.elements,
+            appState: localDataState.appState as any,
             captureUpdate: CaptureUpdateAction.NEVER,
           });
           LibraryIndexedDBAdapter.load().then((data) => {
@@ -948,12 +1040,30 @@ const ExcalidrawWrapper = () => {
 
   return (
     <div
+      ref={appContainerRef}
       style={{ height: "100%" }}
       className={clsx("excalidraw-app", {
         "is-collaborating": isCollaborating,
       })}
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes("Files")) {
+          e.preventDefault();
+        }
+      }}
+      onDrop={async (e) => {
+        const file = e.dataTransfer.files?.[0];
+        if (
+          file &&
+          (file.type === "application/pdf" || file.name.endsWith(".pdf"))
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          await handlePdfImport(file);
+        }
+      }}
     >
       <Excalidraw
+        onPaste={onPaste}
         viewportStatusFrame={viewportStatusFrame}
         userToFollow={userToFollow}
         onChange={onChange}
@@ -1001,12 +1111,62 @@ const ExcalidrawWrapper = () => {
         theme={editorTheme}
         onThemeChange={setAppTheme}
         renderTopRightUI={(isMobile) => {
-          if (isMobile || !collabAPI || !isCollabAvailable) {
+          if (isMobile) {
             return null;
           }
 
           return (
-            <div className="excalidraw-ui-top-right">
+            <div
+              className="excalidraw-ui-top-right"
+              style={{ display: "flex", alignItems: "center", gap: 8 }}
+            >
+              <button
+                type="button"
+                className="btn-drawings-dashboard-trigger"
+                onClick={() => setIsDashboardOpen(true)}
+                title="My Drawings & Documents"
+                style={{
+                  background: "var(--island-bg-color, #ffffff)",
+                  border: "1px solid var(--default-border-color, #dee2e6)",
+                  borderRadius: "8px",
+                  padding: "6px 12px",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  fontSize: "0.85rem",
+                  fontWeight: 600,
+                  color: "var(--text-primary-color, #212529)",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+                }}
+              >
+                <span>📁</span>
+                <span>Drawings</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => pdfInputRef.current?.click()}
+                title="Insert PDF File & Annotate"
+                style={{
+                  background: "var(--island-bg-color, #ffffff)",
+                  border: "1px solid var(--default-border-color, #dee2e6)",
+                  borderRadius: "8px",
+                  padding: "6px 10px",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "4px",
+                  fontSize: "0.85rem",
+                  fontWeight: 600,
+                  color: "var(--text-primary-color, #212529)",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+                }}
+              >
+                <span>📄</span>
+                <span>PDF</span>
+              </button>
+
               {excalidrawAPI?.getEditorInterface().formFactor === "desktop" && (
                 <ExcalidrawPlusPromoBanner
                   isSignedIn={isExcalidrawPlusSignedUser}
@@ -1014,13 +1174,15 @@ const ExcalidrawWrapper = () => {
               )}
 
               {collabError.message && <CollabError collabError={collabError} />}
-              <LiveCollaborationTrigger
-                isCollaborating={isCollaborating}
-                onSelect={() =>
-                  setShareDialogState({ isOpen: true, type: "share" })
-                }
-                editorInterface={editorInterface}
-              />
+              {collabAPI && isCollabAvailable && (
+                <LiveCollaborationTrigger
+                  isCollaborating={isCollaborating}
+                  onSelect={() =>
+                    setShareDialogState({ isOpen: true, type: "share" })
+                  }
+                  editorInterface={editorInterface}
+                />
+              )}
             </div>
           );
         }}
@@ -1041,6 +1203,9 @@ const ExcalidrawWrapper = () => {
           isCollabEnabled={isCollabAvailable}
           theme={appTheme}
           refresh={() => forceRefresh((prev) => !prev)}
+          onOpenDashboard={() => setIsDashboardOpen(true)}
+          onInsertPdf={() => pdfInputRef.current?.click()}
+          onOpenSupabaseAuth={() => setIsAuthModalOpen(true)}
         />
         <AppWelcomeScreen
           onCollabDialogOpen={onCollabDialogOpen}
@@ -1306,6 +1471,59 @@ const ExcalidrawWrapper = () => {
           />
         )}
       </Excalidraw>
+
+      <input
+        ref={pdfInputRef}
+        type="file"
+        accept="application/pdf,.pdf"
+        style={{ display: "none" }}
+        onChange={async (e) => {
+          const file = e.target.files?.[0];
+          if (file) {
+            await handlePdfImport(file);
+          }
+          e.target.value = "";
+        }}
+      />
+
+      <DocumentsDashboard
+        isOpen={isDashboardOpen}
+        onClose={() => setIsDashboardOpen(false)}
+        excalidrawAPI={excalidrawAPI}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
+      />
+
+      <SupabaseAuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+      />
+
+      {pdfProgress && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: "28px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "rgba(33, 37, 41, 0.94)",
+            color: "#ffffff",
+            padding: "10px 22px",
+            borderRadius: "8px",
+            zIndex: 9999,
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+            fontSize: "0.9rem",
+            fontWeight: 600,
+          }}
+        >
+          <span>⏳</span>
+          <span>
+            Rasterizing PDF: Page {pdfProgress.currentPage} of {pdfProgress.totalPages}...
+          </span>
+        </div>
+      )}
     </div>
   );
 };

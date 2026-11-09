@@ -45,6 +45,7 @@ import { FileManager } from "./FileManager";
 import { FileStatusStore } from "./fileStatusStore";
 import { Locker } from "./Locker";
 import { updateBrowserStateVersion } from "./tabSync";
+import { saveDocument, getActiveDocumentId } from "./documentStore";
 
 const filesStore = createStore("files-db", "files-store");
 
@@ -74,9 +75,6 @@ const saveDataStateToLocalStorage = (
   elements: readonly ExcalidrawElement[],
   appState: AppState,
 ) => {
-  const localStorageQuotaExceeded = appJotaiStore.get(
-    localStorageQuotaExceededAtom,
-  );
   try {
     const _appState = clearAppStateForLocalStorage(appState);
 
@@ -87,24 +85,36 @@ const saveDataStateToLocalStorage = (
       _appState.openSidebar = null;
     }
 
-    localStorage.setItem(
-      STORAGE_KEYS.LOCAL_STORAGE_ELEMENTS,
-      JSON.stringify(getNonDeletedElements(elements)),
-    );
-    localStorage.setItem(
-      STORAGE_KEYS.LOCAL_STORAGE_APP_STATE,
-      JSON.stringify(_appState),
-    );
+    const nonDeletedElements = getNonDeletedElements(elements);
+    const activeDocId = getActiveDocumentId();
+
+    // 1. High-capacity persistence via IndexedDB (eliminates 5MB localStorage threshold)
+    saveDocument({
+      id: activeDocId,
+      elements: nonDeletedElements,
+      appState: _appState,
+    });
+
+    // 2. Best-effort write to localStorage for compatibility if it fits
+    try {
+      localStorage.setItem(
+        STORAGE_KEYS.LOCAL_STORAGE_ELEMENTS,
+        JSON.stringify(nonDeletedElements),
+      );
+      localStorage.setItem(
+        STORAGE_KEYS.LOCAL_STORAGE_APP_STATE,
+        JSON.stringify(_appState),
+      );
+    } catch {
+      // If localStorage is full, ignore it because data is safely stored in IndexedDB!
+    }
+
     updateBrowserStateVersion(STORAGE_KEYS.VERSION_DATA_STATE);
-    if (localStorageQuotaExceeded) {
+    if (appJotaiStore.get(localStorageQuotaExceededAtom)) {
       appJotaiStore.set(localStorageQuotaExceededAtom, false);
     }
   } catch (error: any) {
-    // Unable to access window.localStorage
-    console.error(error);
-    if (isQuotaExceededError(error) && !localStorageQuotaExceeded) {
-      appJotaiStore.set(localStorageQuotaExceededAtom, true);
-    }
+    console.error("Error saving data state:", error);
   }
 };
 

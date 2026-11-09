@@ -22,10 +22,38 @@ export const AppMainMenu: React.FC<{
   isCollabEnabled: boolean;
   theme: Theme | "system";
   refresh: () => void;
+  onOpenDashboard?: () => void;
+  onInsertPdf?: () => void;
+  onOpenSupabaseAuth?: () => void;
 }> = React.memo((props) => {
   const { t } = useI18n();
   return (
     <MainMenu>
+      {props.onOpenDashboard && (
+        <MainMenu.Item
+          icon={<span style={{ fontSize: "1.1rem" }}>📁</span>}
+          onSelect={props.onOpenDashboard}
+        >
+          My Drawings
+        </MainMenu.Item>
+      )}
+      {props.onInsertPdf && (
+        <MainMenu.Item
+          icon={<span style={{ fontSize: "1.1rem" }}>📄</span>}
+          onSelect={props.onInsertPdf}
+        >
+          Insert PDF & Annotate
+        </MainMenu.Item>
+      )}
+      {props.onOpenSupabaseAuth && (
+        <MainMenu.Item
+          icon={<span style={{ fontSize: "1.1rem" }}>☁️</span>}
+          onSelect={props.onOpenSupabaseAuth}
+        >
+          Supabase Cloud Sync
+        </MainMenu.Item>
+      )}
+      {(props.onOpenDashboard || props.onInsertPdf) && <MainMenu.Separator />}
       <MainMenu.DefaultItems.LoadScene />
       <MainMenu.DefaultItems.SaveToActiveFile />
       <MainMenu.DefaultItems.Export />
