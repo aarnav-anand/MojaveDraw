@@ -1,4 +1,5 @@
 {
+  "framework": "vite",
   "buildCommand": "yarn build:app",
   "outputDirectory": "excalidraw-app/build",
   "installCommand": "yarn install",
