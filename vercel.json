@@ -1,45 +1,45 @@
 {
+  "framework": "vite",
+  "buildCommand": "yarn build:app",
+  "outputDirectory": "build",
+  "installCommand": "yarn install",
   "headers": [
     {
       "source": "/(.*)",
       "headers": [
         {
           "key": "Access-Control-Allow-Origin",
-          "value": "https://excalidraw.com"
+          "value": "*"
         },
         {
           "key": "X-Content-Type-Options",
           "value": "nosniff"
         },
         {
-          "key": "Feature-Policy",
-          "value": "*"
+          "key": "X-Frame-Options",
+          "value": "SAMEORIGIN"
         },
         {
           "key": "Referrer-Policy",
-          "value": "origin"
+          "value": "strict-origin-when-cross-origin"
         }
       ]
     },
     {
-      "source": "/:file*.woff2",
+      "source": "/assets/(.*)",
       "headers": [
         {
           "key": "Cache-Control",
-          "value": "public, max-age=31536000"
-        },
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "https://excalidraw.com"
+          "value": "public, max-age=31536000, immutable"
         }
       ]
     },
     {
-      "source": "/(Virgil|Cascadia|Assistant-Regular).woff2",
+      "source": "/(.*).woff2",
       "headers": [
         {
           "key": "Cache-Control",
-          "value": "public, max-age=31536000"
+          "value": "public, max-age=31536000, immutable"
         },
         {
           "key": "Access-Control-Allow-Origin",
@@ -48,22 +48,10 @@
       ]
     }
   ],
-  "redirects": [
+  "rewrites": [
     {
-      "source": "/webex/:match*",
-      "destination": "https://for-webex.excalidraw.com"
-    },
-    {
-      "source": "/:path*",
-      "has": [
-        {
-          "type": "host",
-          "value": "vscode.excalidraw.com"
-        }
-      ],
-      "destination": "https://marketplace.visualstudio.com/items?itemName=pomdtr.excalidraw-editor"
+      "source": "/((?!assets/|favicon|robots\\.txt|manifest\\.webmanifest|sw\\.js|workbox-.*).*)",
+      "destination": "/index.html"
     }
-  ],
-  "outputDirectory": "excalidraw-app/build",
-  "installCommand": "yarn install"
+  ]
 }

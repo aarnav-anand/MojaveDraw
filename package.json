@@ -52,7 +52,7 @@
   "scripts": {
     "build-node": "node ./scripts/build-node.js",
     "build:app:docker": "yarn --cwd ./excalidraw-app build:app:docker",
-    "build:app": "yarn --cwd ./excalidraw-app build:app",
+    "build:app": "yarn --cwd ./excalidraw-app build:app && node ./scripts/copy-build.js",
     "build:common": "yarn --cwd ./packages/common build:esm",
     "build:element": "yarn --cwd ./packages/element build:esm",
     "build:excalidraw": "yarn --cwd ./packages/excalidraw build:esm",
@@ -64,7 +64,7 @@
     "stats:bundle": "yarn --cwd ./excalidraw-app cross-env VITE_APP_ENABLE_TRACKING=true vite build --config ../scripts/stats/vite.config.mts",
     "stats:perf": "node ./scripts/stats/perf.mjs",
     "stats:compare": "node ./scripts/stats/perf.mjs --compare",
-    "build": "yarn --cwd ./excalidraw-app build",
+    "build": "yarn --cwd ./excalidraw-app build && node ./scripts/copy-build.js",
     "build:preview": "yarn --cwd ./excalidraw-app build:preview",
     "start": "yarn --cwd ./excalidraw-app start",
     "start:production": "yarn --cwd ./excalidraw-app start:production",
