@@ -152,7 +152,11 @@ import { DocumentsDashboard, NewDrawingDialog } from "./components/DocumentsDash
 import { ObsidianSidebar } from "./components/ObsidianSidebar";
 import { SupabaseAuthModal } from "./components/SupabaseAuthModal";
 import { isSupabaseConfigured, getSupabaseUser } from "./data/supabase";
-import { insertPdfIntoCanvas } from "./data/pdfImporter";
+import {
+  insertPdfIntoCanvas,
+  hasPdfInCanvas,
+  deletePdfFromCanvas,
+} from "./data/pdfImporter";
 import type { PdfImportProgress } from "./data/pdfImporter";
 import {
   getActiveDocumentId,
@@ -509,8 +513,34 @@ const ExcalidrawWrapper = () => {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [showNewDrawingDialog, setShowNewDrawingDialog] = useState(false);
   const [pdfProgress, setPdfProgress] = useState<PdfImportProgress | null>(null);
+  const [hasPdf, setHasPdf] = useState(false);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const appContainerRef = useRef<HTMLDivElement>(null);
+
+  const handleDeletePdf = useCallback(async () => {
+    if (!excalidrawAPI) {
+      return;
+    }
+    const ownerWindow = appContainerRef.current?.ownerDocument?.defaultView || window;
+    const confirmed = ownerWindow.confirm(
+      "Are you sure you want to delete all PDF pages from this drawing? Your annotations will remain.",
+    );
+    if (!confirmed) {
+      return;
+    }
+    const { deletedCount } = deletePdfFromCanvas(excalidrawAPI);
+    if (deletedCount > 0) {
+      setHasPdf(false);
+      const currentDocId = getActiveDocumentId();
+      await saveDocument({
+        id: currentDocId,
+        title: excalidrawAPI.getName() || undefined,
+        elements: excalidrawAPI.getSceneElements(),
+        appState: excalidrawAPI.getAppState(),
+        files: excalidrawAPI.getFiles(),
+      });
+    }
+  }, [excalidrawAPI]);
 
   // Off the bat: prompt user to sign in if not authenticated yet
   useEffect(() => {
@@ -551,6 +581,7 @@ const ExcalidrawWrapper = () => {
           file,
           (progress) => setPdfProgress(progress),
         );
+        setHasPdf(true);
       } catch (err: any) {
         console.error("Failed to insert PDF:", err);
         setErrorMessage(err.message || "Failed to parse and insert PDF.");
@@ -610,6 +641,8 @@ const ExcalidrawWrapper = () => {
           excalidrawAPI.addFiles(Object.values(doc.files));
         }
 
+        setHasPdf(hasPdfInCanvas(doc.elements || []));
+
         excalidrawAPI.updateScene({
           elements: doc.elements || [],
           appState: {
@@ -648,6 +681,7 @@ const ExcalidrawWrapper = () => {
       setActiveDocIdToUrl(newDoc.id);
       setActiveDocId(newDoc.id);
       setNewDrawingFolderId(null);
+      setHasPdf(false);
 
       excalidrawAPI.resetScene();
       excalidrawAPI.updateScene({
@@ -914,6 +948,11 @@ const ExcalidrawWrapper = () => {
     appState: AppState,
     files: BinaryFiles,
   ) => {
+    const containsPdf = hasPdfInCanvas(elements);
+    if (containsPdf !== hasPdf) {
+      setHasPdf(containsPdf);
+    }
+
     if (collabAPI?.isCollaborating()) {
       collabAPI.syncElements(elements);
     }
@@ -1242,30 +1281,6 @@ const ExcalidrawWrapper = () => {
             >
               <button
                 type="button"
-                className="btn-drawings-dashboard-trigger"
-                onClick={() => setIsDashboardOpen(true)}
-                title="My Drawings & Documents"
-                style={{
-                  background: "var(--island-bg-color, #ffffff)",
-                  border: "1px solid var(--default-border-color, #dee2e6)",
-                  borderRadius: "8px",
-                  padding: "6px 12px",
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  fontSize: "0.85rem",
-                  fontWeight: 600,
-                  color: "var(--text-primary-color, #212529)",
-                  boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-                }}
-              >
-                <span>📁</span>
-                <span>Drawings</span>
-              </button>
-
-              <button
-                type="button"
                 onClick={() => pdfInputRef.current?.click()}
                 title="Insert PDF File & Annotate"
                 style={{
@@ -1286,6 +1301,32 @@ const ExcalidrawWrapper = () => {
                 <span>📄</span>
                 <span>PDF</span>
               </button>
+
+              {hasPdf && (
+                <button
+                  type="button"
+                  className="btn-delete-pdf-trigger"
+                  onClick={handleDeletePdf}
+                  title="Delete PDF pages from this drawing"
+                  style={{
+                    background: "var(--island-bg-color, #ffffff)",
+                    border: "1px solid #ffc9c9",
+                    color: "#e03131",
+                    borderRadius: "8px",
+                    padding: "6px 10px",
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "4px",
+                    fontSize: "0.85rem",
+                    fontWeight: 600,
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+                  }}
+                >
+                  <span>🗑️</span>
+                  <span>Delete PDF</span>
+                </button>
+              )}
 
               {excalidrawAPI?.getEditorInterface().formFactor === "desktop" && (
                 <ExcalidrawPlusPromoBanner

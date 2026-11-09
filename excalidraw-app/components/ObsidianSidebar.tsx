@@ -8,6 +8,9 @@ import {
   duplicateDocument,
   deleteDocument,
   saveDocument,
+  moveDocumentToFolder,
+  createDocument,
+  deletePdfFromDocument,
   subscribeToStoreChanges,
 } from "../data/documentStore";
 import type { DocumentMetadata, FolderItem } from "../data/documentStore";
@@ -48,6 +51,28 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
+  // Drag-and-drop state
+  const [dragOverFolderId, setDragOverFolderId] = useState<string | null | "root">(null);
+
+  // Sidebar theme state (dark default, togglable)
+  const [sidebarTheme, setSidebarTheme] = useState<"dark" | "light">(() => {
+    if (typeof localStorage !== "undefined") {
+      const stored = localStorage.getItem("mojave_sidebar_theme");
+      if (stored === "dark" || stored === "light") {
+        return stored;
+      }
+    }
+    return "dark";
+  });
+
+  const toggleSidebarTheme = () => {
+    const nextTheme = sidebarTheme === "dark" ? "light" : "dark";
+    setSidebarTheme(nextTheme);
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("mojave_sidebar_theme", nextTheme);
+    }
+  };
+
   // Renaming state
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [editingType, setEditingType] = useState<"doc" | "folder" | null>(null);
@@ -59,16 +84,24 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   const loadData = useCallback(async () => {
+    let user = null;
+    if (isSupabaseConfigured) {
+      user = await getSupabaseUser();
+      setUserEmail(user?.email || null);
+    }
+
     const [docsList, foldersList] = await Promise.all([
       listDocuments(),
       listFolders(),
     ]);
-    setDocuments(docsList);
-    setFolders(foldersList);
 
-    if (isSupabaseConfigured) {
-      const user = await getSupabaseUser();
-      setUserEmail(user?.email || null);
+    // Requirement 7: Show ONLY drawings/folders stored in Supabase, not local cache/memory
+    if (isSupabaseConfigured && !user) {
+      setDocuments([]);
+      setFolders([]);
+    } else {
+      setDocuments(docsList.filter((d) => !!d.syncedToCloud));
+      setFolders(foldersList.filter((f) => !!f.syncedToCloud));
     }
   }, []);
 
@@ -186,6 +219,74 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
     }
   };
 
+  const handleDeletePdfFromDoc = async (
+    e: React.MouseEvent,
+    docId: string,
+    docTitle: string,
+  ) => {
+    e.stopPropagation();
+    const confirmed = window.confirm(
+      `Remove all PDF pages from drawing "${docTitle}"? Your drawings and notes will be kept.`,
+    );
+    if (confirmed) {
+      const removed = await deletePdfFromDocument(docId);
+      if (removed) {
+        if (docId === activeDocId) {
+          window.location.reload();
+        } else {
+          await loadData();
+        }
+      } else {
+        window.alert("No PDF pages found in this drawing.");
+      }
+    }
+  };
+
+  const handleDropOnFileTree = async (
+    e: React.DragEvent,
+    targetFolderId: string | null,
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverFolderId(null);
+
+    // 1. Internal document drag & drop
+    const internalDocId = e.dataTransfer.getData("application/x-mojave-doc-id");
+    if (internalDocId) {
+      await moveDocumentToFolder(internalDocId, targetFolderId);
+      await loadData();
+      return;
+    }
+
+    // 2. Drag & drop .excalidraw or .json files from user's OS file system
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length > 0) {
+      for (const file of files) {
+        if (
+          file.name.endsWith(".excalidraw") ||
+          file.name.endsWith(".json") ||
+          file.type === "application/json"
+        ) {
+          try {
+            const content = await file.text();
+            const parsed = JSON.parse(content);
+            const docTitle = file.name
+              .replace(/\.excalidraw$/i, "")
+              .replace(/\.json$/i, "");
+            await createDocument(docTitle, targetFolderId, {
+              elements: Array.isArray(parsed.elements) ? parsed.elements : [],
+              appState: parsed.appState || {},
+              files: parsed.files,
+            });
+          } catch (err) {
+            console.error("Failed to parse and import dropped file:", err);
+          }
+        }
+      }
+      await loadData();
+    }
+  };
+
   // Filter items
   const filteredDocs = searchQuery.trim()
     ? documents.filter((d) =>
@@ -199,13 +300,32 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
     const subFolders = folders.filter((f) => f.parentId === folder.id);
     const folderDocs = filteredDocs.filter((d) => d.folderId === folder.id);
     const isEditing = editingItemId === folder.id && editingType === "folder";
+    const isDragOver = dragOverFolderId === folder.id;
 
     return (
       <div key={folder.id} className="obsidian-folder-wrapper">
         <div
-          className="obsidian-item-row obsidian-folder-row"
+          className={`obsidian-item-row obsidian-folder-row ${
+            isDragOver ? "drag-over-folder" : ""
+          }`}
           style={{ paddingLeft: `${depth * 14 + 10}px` }}
           onClick={() => toggleFolder(folder.id)}
+          onDragOver={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = "move";
+            if (dragOverFolderId !== folder.id) {
+              setDragOverFolderId(folder.id);
+            }
+          }}
+          onDragLeave={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (dragOverFolderId === folder.id) {
+              setDragOverFolderId(null);
+            }
+          }}
+          onDrop={(e) => handleDropOnFileTree(e, folder.id)}
         >
           <span className="folder-chevron">
             {isFolderOpen ? "▾" : "▸"}
@@ -221,11 +341,17 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => setEditTitle(e.target.value)}
               onKeyDown={(e) => {
+                e.stopPropagation();
+                (e.nativeEvent as any).stopImmediatePropagation?.();
                 if (e.key === "Enter") {
                   handleSaveRename(e, folder.id);
                 } else if (e.key === "Escape") {
                   setEditingItemId(null);
                 }
+              }}
+              onKeyUp={(e) => {
+                e.stopPropagation();
+                (e.nativeEvent as any).stopImmediatePropagation?.();
               }}
               onBlur={(e) => handleSaveRename(e, folder.id)}
             />
@@ -310,6 +436,12 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
     return (
       <div
         key={doc.id}
+        draggable={!isEditing}
+        onDragStart={(e) => {
+          e.dataTransfer.setData("application/x-mojave-doc-id", doc.id);
+          e.dataTransfer.setData("text/plain", doc.id);
+          e.dataTransfer.effectAllowed = "move";
+        }}
         className={`obsidian-item-row obsidian-doc-row ${
           isActive ? "active-doc" : ""
         }`}
@@ -327,11 +459,17 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
             onClick={(e) => e.stopPropagation()}
             onChange={(e) => setEditTitle(e.target.value)}
             onKeyDown={(e) => {
+              e.stopPropagation();
+              (e.nativeEvent as any).stopImmediatePropagation?.();
               if (e.key === "Enter") {
                 handleSaveRename(e, doc.id);
               } else if (e.key === "Escape") {
                 setEditingItemId(null);
               }
+            }}
+            onKeyUp={(e) => {
+              e.stopPropagation();
+              (e.nativeEvent as any).stopImmediatePropagation?.();
             }}
             onBlur={(e) => handleSaveRename(e, doc.id)}
           />
@@ -377,6 +515,14 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
               </button>
               <button
                 type="button"
+                className="action-btn"
+                title="Delete PDF from Drawing"
+                onClick={(e) => handleDeletePdfFromDoc(e, doc.id, doc.title)}
+              >
+                📄✕
+              </button>
+              <button
+                type="button"
                 className="action-btn delete-btn"
                 title="Delete"
                 onClick={(e) => handleDeleteDoc(e, doc)}
@@ -411,15 +557,22 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
   const rootDocs = filteredDocs.filter((d) => !d.folderId || !folderIdSet.has(d.folderId));
 
   return (
-    <aside className="obsidian-sidebar">
+    <aside className={`obsidian-sidebar sidebar-theme-${sidebarTheme}`}>
       {/* Top Header */}
       <div className="obsidian-header">
         <div className="vault-brand">
-          <span className="brand-icon">🎨</span>
-          <span className="brand-name">MojaveDraw</span>
+          <span className="brand-name">MojaveMath</span>
         </div>
 
         <div className="header-icon-actions">
+          <button
+            type="button"
+            className="header-action-btn"
+            title={sidebarTheme === "dark" ? "Switch to Light Theme" : "Switch to Dark Theme"}
+            onClick={toggleSidebarTheme}
+          >
+            {sidebarTheme === "dark" ? "☀️" : "🌙"}
+          </button>
           <button
             type="button"
             className="header-action-btn"
@@ -463,6 +616,14 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
           placeholder="Search files..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            (e.nativeEvent as any).stopImmediatePropagation?.();
+          }}
+          onKeyUp={(e) => {
+            e.stopPropagation();
+            (e.nativeEvent as any).stopImmediatePropagation?.();
+          }}
         />
         {searchQuery && (
           <button
@@ -476,7 +637,37 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
       </div>
 
       {/* File Tree List */}
-      <div className="obsidian-tree-container">
+      <div
+        className={`obsidian-tree-container ${
+          dragOverFolderId === "root" ? "drag-over-folder" : ""
+        }`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          if (dragOverFolderId !== "root") {
+            setDragOverFolderId("root");
+          }
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget === e.target) {
+            setDragOverFolderId(null);
+          }
+        }}
+        onDrop={(e) => handleDropOnFileTree(e, null)}
+      >
+        {!userEmail && isSupabaseConfigured && (
+          <div className="supabase-login-callout" onClick={onOpenAuthModal}>
+            <div className="callout-icon">☁️</div>
+            <div className="callout-text">
+              <strong>Sign in to Supabase</strong>
+              <span>To load and sync cloud drawings & folders across devices</span>
+            </div>
+            <button type="button" className="btn-callout-signin">
+              Sign In
+            </button>
+          </div>
+        )}
+
         {rootFolders.map((f) => renderFolder(f, 0))}
         {rootDocs.map((doc) => renderDocument(doc, 0))}
 
@@ -503,6 +694,14 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
           <div
             className="folder-prompt-dialog"
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              (e.nativeEvent as any).stopImmediatePropagation?.();
+            }}
+            onKeyUp={(e) => {
+              e.stopPropagation();
+              (e.nativeEvent as any).stopImmediatePropagation?.();
+            }}
           >
             <h4>
               {folderPromptParentId ? "New Sub-folder" : "New Folder"}
@@ -515,9 +714,15 @@ export const ObsidianSidebar: React.FC<ObsidianSidebarProps> = ({
                 value={newFolderName}
                 onChange={(e) => setNewFolderName(e.target.value)}
                 onKeyDown={(e) => {
+                  e.stopPropagation();
+                  (e.nativeEvent as any).stopImmediatePropagation?.();
                   if (e.key === "Escape") {
                     setFolderPromptParentId(false);
                   }
+                }}
+                onKeyUp={(e) => {
+                  e.stopPropagation();
+                  (e.nativeEvent as any).stopImmediatePropagation?.();
                 }}
               />
               <div className="prompt-actions">

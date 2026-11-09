@@ -40,6 +40,34 @@ export const SupabaseAuthModal: React.FC<SupabaseAuthModalProps> = ({
     }
   }, [isOpen]);
 
+  // Shield the main canvas from all keystrokes, numbers, and shortcut commands while inside the modal
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const blockLeakingKeys = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target?.closest?.(".documents-dashboard-modal")
+      ) {
+        e.stopPropagation();
+        (e as any).stopImmediatePropagation?.();
+      }
+    };
+
+    window.addEventListener("keydown", blockLeakingKeys, true);
+    window.addEventListener("keyup", blockLeakingKeys, true);
+    window.addEventListener("keypress", blockLeakingKeys, true);
+
+    return () => {
+      window.removeEventListener("keydown", blockLeakingKeys, true);
+      window.removeEventListener("keyup", blockLeakingKeys, true);
+      window.removeEventListener("keypress", blockLeakingKeys, true);
+    };
+  }, [isOpen]);
+
   if (!isOpen) {
     return null;
   }
@@ -163,6 +191,14 @@ export const SupabaseAuthModal: React.FC<SupabaseAuthModalProps> = ({
       className="documents-dashboard-overlay"
       style={{ zIndex: 1200 }}
       onClick={isInitialPrompt ? undefined : onClose}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        (e.nativeEvent as any).stopImmediatePropagation?.();
+      }}
+      onKeyUp={(e) => {
+        e.stopPropagation();
+        (e.nativeEvent as any).stopImmediatePropagation?.();
+      }}
     >
       <div
         className="documents-dashboard-modal"
@@ -174,6 +210,14 @@ export const SupabaseAuthModal: React.FC<SupabaseAuthModalProps> = ({
           borderRadius: "14px",
         }}
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          (e.nativeEvent as any).stopImmediatePropagation?.();
+        }}
+        onKeyUp={(e) => {
+          e.stopPropagation();
+          (e.nativeEvent as any).stopImmediatePropagation?.();
+        }}
       >
         <div className="dashboard-header" style={{ padding: "18px 24px" }}>
           <div className="header-title-section">
@@ -285,6 +329,14 @@ export const SupabaseAuthModal: React.FC<SupabaseAuthModalProps> = ({
                   placeholder="name@example.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    (e.nativeEvent as any).stopImmediatePropagation?.();
+                  }}
+                  onKeyUp={(e) => {
+                    e.stopPropagation();
+                    (e.nativeEvent as any).stopImmediatePropagation?.();
+                  }}
                   style={{
                     padding: "10px 12px",
                     borderRadius: "8px",
@@ -305,6 +357,14 @@ export const SupabaseAuthModal: React.FC<SupabaseAuthModalProps> = ({
                   placeholder="••••••••"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    (e.nativeEvent as any).stopImmediatePropagation?.();
+                  }}
+                  onKeyUp={(e) => {
+                    e.stopPropagation();
+                    (e.nativeEvent as any).stopImmediatePropagation?.();
+                  }}
                   style={{
                     padding: "10px 12px",
                     borderRadius: "8px",

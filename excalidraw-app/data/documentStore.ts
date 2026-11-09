@@ -191,37 +191,49 @@ export const listFolders = async (): Promise<FolderItem[]> => {
   await initializeStoresIfNeeded();
 
   try {
-    // Check Supabase if configured and logged in
+    // When Supabase is configured, Supabase is the sole source of truth
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
       if (user) {
         const cloudFolders = await fetchFoldersFromSupabase();
+        const cloudFolderIds = new Set<string>();
+        const list: FolderItem[] = [];
+
         for (const cf of cloudFolders) {
           const cfUpdatedAt = new Date(cf.updated_at).getTime();
-          const existing = memoryFolders.get(cf.id);
+          const item: FolderItem = {
+            id: cf.id,
+            name: cf.name,
+            parentId: cf.parent_id || null,
+            createdAt: new Date(cf.created_at).getTime(),
+            updatedAt: cfUpdatedAt,
+            syncedToCloud: true,
+          };
+          cloudFolderIds.add(cf.id);
+          memoryFolders.set(cf.id, item);
+          set(cf.id, item, foldersStore).catch(console.warn);
+          list.push(item);
+        }
 
-          if (!existing || cfUpdatedAt >= existing.updatedAt) {
-            const item: FolderItem = {
-              id: cf.id,
-              name: cf.name,
-              parentId: cf.parent_id || null,
-              createdAt: new Date(cf.created_at).getTime(),
-              updatedAt: cfUpdatedAt,
-              syncedToCloud: true,
-            };
-            memoryFolders.set(cf.id, item);
-            set(cf.id, item, foldersStore).catch(console.warn);
+        // Exclude / remove any local memory folders not present in Supabase
+        for (const [id] of memoryFolders.entries()) {
+          if (!cloudFolderIds.has(id)) {
+            memoryFolders.delete(id);
           }
         }
+
+        list.sort((a, b) => a.name.localeCompare(b.name));
+        return list;
       }
     }
 
-    const list = Array.from(memoryFolders.values());
+    // Only return folders that are verified synced to cloud
+    const list = Array.from(memoryFolders.values()).filter((f) => !!f.syncedToCloud);
     list.sort((a, b) => a.name.localeCompare(b.name));
     return list;
   } catch (error) {
     console.error("Failed to list folders:", error);
-    return Array.from(memoryFolders.values());
+    return Array.from(memoryFolders.values()).filter((f) => !!f.syncedToCloud);
   }
 };
 
@@ -369,38 +381,50 @@ export const listDocuments = async (): Promise<DocumentMetadata[]> => {
   await initializeStoresIfNeeded();
 
   try {
-    // Merge cloud documents if Supabase user is logged in
+    // When Supabase is configured, Supabase is the sole source of truth
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
       if (user) {
         const cloudDocs = await fetchDocumentsFromSupabase();
+        const cloudDocIds = new Set<string>();
+        const list: DocumentMetadata[] = [];
+
         for (const cloudDoc of cloudDocs) {
           const cloudUpdatedAt = new Date(cloudDoc.updated_at).getTime();
-          const existing = memoryMeta.get(cloudDoc.id);
+          const meta: DocumentMetadata = {
+            id: cloudDoc.id,
+            title: cloudDoc.title,
+            folderId: cloudDoc.folder_id || null,
+            thumbnail: cloudDoc.thumbnail_url || undefined,
+            createdAt: new Date(cloudDoc.created_at).getTime(),
+            updatedAt: cloudUpdatedAt,
+            syncedToCloud: true,
+          };
+          cloudDocIds.add(cloudDoc.id);
+          memoryMeta.set(cloudDoc.id, meta);
+          set(cloudDoc.id, meta, metaStore).catch(console.warn);
+          list.push(meta);
+        }
 
-          if (!existing || cloudUpdatedAt >= existing.updatedAt) {
-            const meta: DocumentMetadata = {
-              id: cloudDoc.id,
-              title: cloudDoc.title,
-              folderId: cloudDoc.folder_id || null,
-              thumbnail: cloudDoc.thumbnail_url || undefined,
-              createdAt: new Date(cloudDoc.created_at).getTime(),
-              updatedAt: cloudUpdatedAt,
-              syncedToCloud: true,
-            };
-            memoryMeta.set(cloudDoc.id, meta);
-            set(cloudDoc.id, meta, metaStore).catch(console.warn);
+        // Exclude / remove any local memory docs not present in Supabase
+        for (const [id] of memoryMeta.entries()) {
+          if (!cloudDocIds.has(id)) {
+            memoryMeta.delete(id);
           }
         }
+
+        list.sort((a, b) => b.updatedAt - a.updatedAt);
+        return list;
       }
     }
 
-    const list = Array.from(memoryMeta.values());
+    // Only return documents that are verified synced to cloud
+    const list = Array.from(memoryMeta.values()).filter((d) => !!d.syncedToCloud);
     list.sort((a, b) => b.updatedAt - a.updatedAt);
     return list;
   } catch (error) {
     console.error("Failed to list documents:", error);
-    return Array.from(memoryMeta.values());
+    return Array.from(memoryMeta.values()).filter((d) => !!d.syncedToCloud);
   }
 };
 
@@ -546,6 +570,11 @@ export const saveDocument = async (
 export const createDocument = async (
   title?: string,
   folderId?: string | null,
+  initialData?: {
+    elements?: readonly ExcalidrawElement[];
+    appState?: Partial<AppState>;
+    files?: BinaryFiles;
+  },
 ): Promise<ExcalidrawDoc> => {
   await initializeStoresIfNeeded();
 
@@ -555,8 +584,9 @@ export const createDocument = async (
     id,
     title: cleanTitle,
     folderId: folderId || null,
-    elements: [],
-    appState: { name: cleanTitle },
+    elements: initialData?.elements || [],
+    appState: { ...initialData?.appState, name: cleanTitle },
+    files: initialData?.files,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -564,6 +594,29 @@ export const createDocument = async (
   await saveDocument(doc);
   notifyStoreChanged();
   return doc;
+};
+
+export const deletePdfFromDocument = async (docId: string): Promise<boolean> => {
+  const doc = await loadDocument(docId);
+  if (!doc) {
+    return false;
+  }
+  const remainingElements = doc.elements.filter(
+    (el) =>
+      !(
+        el.type === "image" &&
+        (el.fileId?.startsWith("pdf_") || (el.customData as any)?.isPdf)
+      ),
+  );
+  if (remainingElements.length === doc.elements.length) {
+    return false;
+  }
+  await saveDocument({
+    id: docId,
+    elements: remainingElements,
+  });
+  notifyStoreChanged();
+  return true;
 };
 
 export const moveDocumentToFolder = async (

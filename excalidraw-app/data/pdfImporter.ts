@@ -127,6 +127,7 @@ export const insertPdfIntoCanvas = async (
       fileId: page.fileId,
       status: "saved",
       locked: true, // Locked so user can draw, highlight, and annotate freely over it
+      customData: { isPdf: true, pdfFileName: pdfFile.name },
     });
 
     newElements.push(imageElement);
@@ -149,4 +150,49 @@ export const insertPdfIntoCanvas = async (
       animation: true,
     });
   }
+};
+
+/**
+ * Checks whether the given elements contain any PDF-rendered pages
+ */
+export const hasPdfInCanvas = (elements: readonly ExcalidrawElement[]): boolean => {
+  return elements.some(
+    (el) =>
+      !el.isDeleted &&
+      el.type === "image" &&
+      (el.fileId?.startsWith("pdf_") || (el.customData as any)?.isPdf),
+  );
+};
+
+/**
+ * Deletes all PDF pages from the Excalidraw canvas
+ */
+export const deletePdfFromCanvas = (
+  excalidrawAPI: ExcalidrawImperativeAPI,
+): { deletedCount: number } => {
+  const elements = excalidrawAPI.getSceneElements();
+  const pdfFileIds = new Set<string>();
+  const remainingElements: ExcalidrawElement[] = [];
+
+  for (const el of elements) {
+    if (
+      el.type === "image" &&
+      (el.fileId?.startsWith("pdf_") || (el.customData as any)?.isPdf)
+    ) {
+      if (el.fileId) {
+        pdfFileIds.add(el.fileId);
+      }
+    } else {
+      remainingElements.push(el);
+    }
+  }
+
+  const deletedCount = elements.length - remainingElements.length;
+  if (deletedCount > 0) {
+    excalidrawAPI.updateScene({
+      elements: remainingElements,
+    });
+  }
+
+  return { deletedCount };
 };
