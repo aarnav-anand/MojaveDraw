@@ -3,14 +3,10 @@ import {
   supabase,
   isSupabaseConfigured,
   getSupabaseUser,
-  fetchDocumentsFromSupabase,
-  fetchFoldersFromSupabase,
 } from "../data/supabase";
 import {
   listDocuments,
-  saveDocument,
   listFolders,
-  saveFolder,
 } from "../data/documentStore";
 import type { User } from "@supabase/supabase-js";
 
@@ -139,45 +135,8 @@ export const SupabaseAuthModal: React.FC<SupabaseAuthModalProps> = ({
   const handleSyncAll = async () => {
     setLoading(true);
     try {
-      // 1. Pull cloud folders & documents
-      const cloudFolders = await fetchFoldersFromSupabase();
-      for (const cf of cloudFolders) {
-        await saveFolder({
-          id: cf.id,
-          name: cf.name,
-          parentId: cf.parent_id,
-          createdAt: new Date(cf.created_at).getTime(),
-          updatedAt: new Date(cf.updated_at).getTime(),
-        });
-      }
-
-      const cloudDocs = await fetchDocumentsFromSupabase();
-      for (const cloudDoc of cloudDocs) {
-        await saveDocument(
-          {
-            id: cloudDoc.id,
-            title: cloudDoc.title,
-            folderId: cloudDoc.folder_id,
-            elements: cloudDoc.elements,
-            appState: cloudDoc.app_state,
-            thumbnail: cloudDoc.thumbnail_url || undefined,
-          },
-          false,
-        );
-      }
-
-      // 2. Push local folders and documents to cloud
-      const localFolders = await listFolders();
-      for (const f of localFolders) {
-        await saveFolder(f);
-      }
-
-      const localDocs = await listDocuments();
-      for (const localDoc of localDocs) {
-        await saveDocument(localDoc, true);
-      }
-
-      setMessage({ text: "All drawings and folders synced with Supabase!", type: "success" });
+      await Promise.all([listFolders(), listDocuments()]);
+      setMessage({ text: "Loaded your drawings and folders from Supabase.", type: "success" });
       onSyncComplete?.();
     } catch (err: any) {
       setMessage({ text: err.message || "Failed to sync", type: "error" });
@@ -256,7 +215,7 @@ export const SupabaseAuthModal: React.FC<SupabaseAuthModalProps> = ({
                 {`VITE_SUPABASE_URL=...\nVITE_SUPABASE_ANON_KEY=...`}
               </pre>
               <p style={{ margin: "10px 0 0", fontSize: "0.85rem" }}>
-                All your drawings and folders are currently stored securely in your browser's IndexedDB.
+                Cloud storage is required to view and sync drawings, folders, PDFs, and images.
               </p>
               <button
                 type="button"

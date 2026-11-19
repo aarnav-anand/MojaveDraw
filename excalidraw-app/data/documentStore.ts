@@ -6,13 +6,15 @@ import {
   isSupabaseConfigured,
   getSupabaseUser,
   saveDocumentToSupabase,
-  fetchDocumentsFromSupabase,
+  fetchDocumentListFromSupabase,
   fetchDocumentFromSupabase,
   deleteDocumentFromSupabase,
   fetchFoldersFromSupabase,
   saveFolderToSupabase,
   deleteFolderFromSupabase,
   subscribeToSupabaseDocumentChanges,
+  subscribeToSupabaseFolderChanges,
+  onSupabaseAuthStateChange,
 } from "./supabase";
 
 export interface FolderItem {
@@ -62,7 +64,8 @@ const memoryFolders = new Map<string, FolderItem>();
 let isInitialized = false;
 
 // Store change subscribers
-type StoreListener = () => void;
+export type StoreChangeSource = "local" | "remote";
+type StoreListener = (source?: StoreChangeSource) => void;
 const listeners = new Set<StoreListener>();
 
 export const subscribeToStoreChanges = (listener: StoreListener) => {
@@ -72,57 +75,124 @@ export const subscribeToStoreChanges = (listener: StoreListener) => {
   };
 };
 
-export const notifyStoreChanged = () => {
+export const notifyStoreChanged = (source: StoreChangeSource = "local") => {
   listeners.forEach((cb) => {
     try {
-      cb();
+      cb(source);
     } catch (e) {
       console.error("Store listener error:", e);
     }
   });
 };
 
+const clearLocalCaches = () => {
+  memoryDocs.clear();
+  memoryMeta.clear();
+  memoryFolders.clear();
+};
+
+const cacheCloudFolder = (cf: {
+  id: string;
+  name: string;
+  parent_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}): FolderItem => {
+  const item: FolderItem = {
+    id: cf.id,
+    name: cf.name,
+    parentId: cf.parent_id || null,
+    createdAt: new Date(cf.created_at).getTime(),
+    updatedAt: new Date(cf.updated_at).getTime(),
+    syncedToCloud: true,
+  };
+  memoryFolders.set(item.id, item);
+  set(item.id, item, foldersStore).catch(console.warn);
+  return item;
+};
+
+const cacheCloudDocument = (cloudDoc: {
+  id: string;
+  title: string;
+  folder_id?: string | null;
+  elements?: readonly ExcalidrawElement[];
+  app_state?: Partial<AppState>;
+  thumbnail_url?: string | null;
+  files?: BinaryFiles;
+  created_at: string;
+  updated_at: string;
+}): ExcalidrawDoc => {
+  const docFiles = cloudDoc.files || (cloudDoc.app_state as any)?.files;
+  const doc: ExcalidrawDoc = {
+    id: cloudDoc.id,
+    title: cloudDoc.title,
+    folderId: cloudDoc.folder_id || null,
+    elements: cloudDoc.elements || [],
+    appState: cloudDoc.app_state || {},
+    thumbnail: cloudDoc.thumbnail_url || undefined,
+    files: docFiles,
+    createdAt: new Date(cloudDoc.created_at).getTime(),
+    updatedAt: new Date(cloudDoc.updated_at).getTime(),
+    syncedToCloud: true,
+  };
+  memoryDocs.set(doc.id, doc);
+  memoryMeta.set(doc.id, {
+    id: doc.id,
+    title: doc.title,
+    folderId: doc.folderId,
+    thumbnail: doc.thumbnail,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+    syncedToCloud: true,
+  });
+  set(doc.id, doc, docsStore).catch(console.warn);
+  return doc;
+};
+
 // Real-time synchronization across devices via Supabase
 if (typeof window !== "undefined" && isSupabaseConfigured) {
   subscribeToSupabaseDocumentChanges(async (payload) => {
     try {
-      if (payload.new && payload.new.id) {
-        const cloudDoc = await fetchDocumentFromSupabase(payload.new.id);
-        if (cloudDoc) {
-          const docFiles = cloudDoc.files || (cloudDoc.app_state as any)?.files;
-          const doc: ExcalidrawDoc = {
-            id: cloudDoc.id,
-            title: cloudDoc.title,
-            folderId: cloudDoc.folder_id || null,
-            elements: cloudDoc.elements,
-            appState: cloudDoc.app_state,
-            thumbnail: cloudDoc.thumbnail_url || undefined,
-            files: docFiles,
-            createdAt: new Date(cloudDoc.created_at).getTime(),
-            updatedAt: new Date(cloudDoc.updated_at).getTime(),
-            syncedToCloud: true,
-          };
-          memoryDocs.set(doc.id, doc);
-          memoryMeta.set(doc.id, {
-            id: doc.id,
-            title: doc.title,
-            folderId: doc.folderId,
-            thumbnail: doc.thumbnail,
-            createdAt: doc.createdAt,
-            updatedAt: doc.updatedAt,
-            syncedToCloud: true,
-          });
-          set(doc.id, doc, docsStore).catch(console.warn);
-          notifyStoreChanged();
-        }
-      } else if (payload.eventType === "DELETE" && payload.old && payload.old.id) {
+      if (payload.eventType === "DELETE" && payload.old?.id) {
         memoryDocs.delete(payload.old.id);
         memoryMeta.delete(payload.old.id);
         del(payload.old.id, docsStore).catch(console.warn);
-        notifyStoreChanged();
+        notifyStoreChanged("remote");
+        return;
+      }
+      if (payload.new?.id) {
+        const cloudDoc = await fetchDocumentFromSupabase(payload.new.id);
+        if (cloudDoc) {
+          cacheCloudDocument(cloudDoc);
+          notifyStoreChanged("remote");
+        }
       }
     } catch (err) {
-      console.error("Realtime sync error:", err);
+      console.error("Realtime document sync error:", err);
+    }
+  });
+
+  subscribeToSupabaseFolderChanges(async (payload) => {
+    try {
+      if (payload.eventType === "DELETE" && payload.old?.id) {
+        memoryFolders.delete(payload.old.id);
+        del(payload.old.id, foldersStore).catch(console.warn);
+        notifyStoreChanged("remote");
+        return;
+      }
+      if (payload.new?.id) {
+        cacheCloudFolder(payload.new);
+        notifyStoreChanged("remote");
+      }
+    } catch (err) {
+      console.error("Realtime folder sync error:", err);
+    }
+  });
+
+  onSupabaseAuthStateChange((user) => {
+    if (!user) {
+      clearLocalCaches();
+      notifyStoreChanged("remote");
     }
   });
 }
@@ -179,7 +249,12 @@ const initializeStoresIfNeeded = async () => {
   isInitialized = true;
 
   try {
-    // 1. Load local metadata into memory
+    // When Supabase is configured, never hydrate the UI from IndexedDB /
+    // localStorage. Cloud records are loaded on demand via list/load APIs.
+    if (isSupabaseConfigured) {
+      return;
+    }
+
     const metaEntries = await entries(metaStore).catch(() => []);
     for (const [, value] of metaEntries) {
       if (value && typeof value === "object") {
@@ -188,7 +263,6 @@ const initializeStoresIfNeeded = async () => {
       }
     }
 
-    // 2. Load local folders into memory
     const folderEntries = await entries(foldersStore).catch(() => []);
     for (const [, value] of folderEntries) {
       if (value && typeof value === "object") {
@@ -197,7 +271,6 @@ const initializeStoresIfNeeded = async () => {
       }
     }
 
-    // 3. Migrate from legacy "excalidraw-documents-db" if needed
     try {
       const legacyEntries = await entries(legacyDocsStore).catch(() => []);
       for (const [, value] of legacyEntries) {
@@ -223,7 +296,6 @@ const initializeStoresIfNeeded = async () => {
       // Legacy db might not exist or be empty, ignore
     }
 
-    // 4. Migrate from localStorage if needed (e.g. fresh installation)
     await migrateFromLocalStorageIfNeeded();
   } catch (error) {
     console.error("Failed to initialize stores:", error);
@@ -238,49 +310,36 @@ export const listFolders = async (): Promise<FolderItem[]> => {
   await initializeStoresIfNeeded();
 
   try {
-    // When Supabase is configured, Supabase is the sole source of truth
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
-      if (user) {
-        const cloudFolders = await fetchFoldersFromSupabase();
-        const cloudFolderIds = new Set<string>();
-        const list: FolderItem[] = [];
-
-        for (const cf of cloudFolders) {
-          const cfUpdatedAt = new Date(cf.updated_at).getTime();
-          const item: FolderItem = {
-            id: cf.id,
-            name: cf.name,
-            parentId: cf.parent_id || null,
-            createdAt: new Date(cf.created_at).getTime(),
-            updatedAt: cfUpdatedAt,
-            syncedToCloud: true,
-          };
-          cloudFolderIds.add(cf.id);
-          memoryFolders.set(cf.id, item);
-          set(cf.id, item, foldersStore).catch(console.warn);
-          list.push(item);
-        }
-
-        // Exclude / remove any local memory folders not present in Supabase
-        for (const [id] of memoryFolders.entries()) {
-          if (!cloudFolderIds.has(id)) {
-            memoryFolders.delete(id);
-          }
-        }
-
-        list.sort((a, b) => a.name.localeCompare(b.name));
-        return list;
+      if (!user) {
+        clearLocalCaches();
+        return [];
       }
+
+      const cloudFolders = await fetchFoldersFromSupabase();
+      const cloudFolderIds = new Set<string>();
+      const list: FolderItem[] = [];
+
+      for (const cf of cloudFolders) {
+        cloudFolderIds.add(cf.id);
+        list.push(cacheCloudFolder(cf));
+      }
+
+      for (const [id] of memoryFolders.entries()) {
+        if (!cloudFolderIds.has(id)) {
+          memoryFolders.delete(id);
+        }
+      }
+
+      list.sort((a, b) => a.name.localeCompare(b.name));
+      return list;
     }
 
-    // Only return folders that are verified synced to cloud
-    const list = Array.from(memoryFolders.values()).filter((f) => !!f.syncedToCloud);
-    list.sort((a, b) => a.name.localeCompare(b.name));
-    return list;
+    return [];
   } catch (error) {
     console.error("Failed to list folders:", error);
-    return Array.from(memoryFolders.values()).filter((f) => !!f.syncedToCloud);
+    return [];
   }
 };
 
@@ -299,27 +358,25 @@ export const createFolder = async (
     updatedAt: Date.now(),
   };
 
-  // Immediate in-memory cache update
-  memoryFolders.set(folder.id, folder);
-
-  // Background IDB write
-  set(folder.id, folder, foldersStore).catch(console.error);
-
-  // Cloud sync
   if (isSupabaseConfigured) {
-    saveFolderToSupabase({
+    const user = await getSupabaseUser();
+    if (!user) {
+      return folder;
+    }
+    const ok = await saveFolderToSupabase({
       id: folder.id,
       name: folder.name,
       parent_id: folder.parentId,
-    }).then((ok) => {
-      if (ok) {
-        folder.syncedToCloud = true;
-        set(folder.id, folder, foldersStore).catch(console.warn);
-      }
     });
+    if (!ok) {
+      return folder;
+    }
+    folder.syncedToCloud = true;
   }
 
-  notifyStoreChanged();
+  memoryFolders.set(folder.id, folder);
+  set(folder.id, folder, foldersStore).catch(console.error);
+  notifyStoreChanged("local");
   return folder;
 };
 
@@ -331,23 +388,25 @@ export const saveFolder = async (folder: FolderItem): Promise<void> => {
     updatedAt: Date.now(),
   };
 
-  memoryFolders.set(updated.id, updated);
-  set(updated.id, updated, foldersStore).catch(console.error);
-
   if (isSupabaseConfigured) {
-    saveFolderToSupabase({
+    const user = await getSupabaseUser();
+    if (!user) {
+      return;
+    }
+    const ok = await saveFolderToSupabase({
       id: updated.id,
       name: updated.name,
       parent_id: updated.parentId,
-    }).then((ok) => {
-      if (ok) {
-        updated.syncedToCloud = true;
-        set(updated.id, updated, foldersStore).catch(console.warn);
-      }
     });
+    if (!ok) {
+      return;
+    }
+    updated.syncedToCloud = true;
   }
 
-  notifyStoreChanged();
+  memoryFolders.set(updated.id, updated);
+  set(updated.id, updated, foldersStore).catch(console.error);
+  notifyStoreChanged("local");
 };
 
 export const deleteFolder = async (id: string): Promise<boolean> => {
@@ -374,10 +433,10 @@ export const deleteFolder = async (id: string): Promise<boolean> => {
     }
 
     if (isSupabaseConfigured) {
-      deleteFolderFromSupabase(id).catch(console.warn);
+      await deleteFolderFromSupabase(id);
     }
 
-    notifyStoreChanged();
+    notifyStoreChanged("local");
     return true;
   } catch (error) {
     console.error("Failed to delete folder:", error);
@@ -390,6 +449,9 @@ export const deleteFolder = async (id: string): Promise<boolean> => {
 // ---------------------------------------------------------------------------
 
 export const migrateFromLocalStorageIfNeeded = async (): Promise<ExcalidrawDoc | null> => {
+  if (isSupabaseConfigured) {
+    return null;
+  }
   try {
     const rawElements = localStorage.getItem(STORAGE_KEYS.LOCAL_STORAGE_ELEMENTS);
     const rawState = localStorage.getItem(STORAGE_KEYS.LOCAL_STORAGE_APP_STATE);
@@ -428,50 +490,48 @@ export const listDocuments = async (): Promise<DocumentMetadata[]> => {
   await initializeStoresIfNeeded();
 
   try {
-    // When Supabase is configured, Supabase is the sole source of truth
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
-      if (user) {
-        const cloudDocs = await fetchDocumentsFromSupabase();
-        const cloudDocIds = new Set<string>();
-        const list: DocumentMetadata[] = [];
-
-        for (const cloudDoc of cloudDocs) {
-          const cloudUpdatedAt = new Date(cloudDoc.updated_at).getTime();
-          const meta: DocumentMetadata = {
-            id: cloudDoc.id,
-            title: cloudDoc.title,
-            folderId: cloudDoc.folder_id || null,
-            thumbnail: cloudDoc.thumbnail_url || undefined,
-            createdAt: new Date(cloudDoc.created_at).getTime(),
-            updatedAt: cloudUpdatedAt,
-            syncedToCloud: true,
-          };
-          cloudDocIds.add(cloudDoc.id);
-          memoryMeta.set(cloudDoc.id, meta);
-          set(cloudDoc.id, meta, metaStore).catch(console.warn);
-          list.push(meta);
-        }
-
-        // Exclude / remove any local memory docs not present in Supabase
-        for (const [id] of memoryMeta.entries()) {
-          if (!cloudDocIds.has(id)) {
-            memoryMeta.delete(id);
-          }
-        }
-
-        list.sort((a, b) => b.updatedAt - a.updatedAt);
-        return list;
+      if (!user) {
+        clearLocalCaches();
+        return [];
       }
+
+      const cloudDocs = await fetchDocumentListFromSupabase();
+      const cloudDocIds = new Set<string>();
+      const list: DocumentMetadata[] = [];
+
+      for (const cloudDoc of cloudDocs) {
+        const meta: DocumentMetadata = {
+          id: cloudDoc.id,
+          title: cloudDoc.title,
+          folderId: cloudDoc.folder_id || null,
+          thumbnail: cloudDoc.thumbnail_url || undefined,
+          createdAt: new Date(cloudDoc.created_at).getTime(),
+          updatedAt: new Date(cloudDoc.updated_at).getTime(),
+          syncedToCloud: true,
+        };
+        cloudDocIds.add(cloudDoc.id);
+        memoryMeta.set(cloudDoc.id, meta);
+        set(cloudDoc.id, meta, metaStore).catch(console.warn);
+        list.push(meta);
+      }
+
+      for (const [id] of memoryMeta.entries()) {
+        if (!cloudDocIds.has(id)) {
+          memoryMeta.delete(id);
+          memoryDocs.delete(id);
+        }
+      }
+
+      list.sort((a, b) => b.updatedAt - a.updatedAt);
+      return list;
     }
 
-    // Only return documents that are verified synced to cloud
-    const list = Array.from(memoryMeta.values()).filter((d) => !!d.syncedToCloud);
-    list.sort((a, b) => b.updatedAt - a.updatedAt);
-    return list;
+    return [];
   } catch (error) {
     console.error("Failed to list documents:", error);
-    return Array.from(memoryMeta.values()).filter((d) => !!d.syncedToCloud);
+    return [];
   }
 };
 
@@ -479,67 +539,132 @@ export const loadDocument = async (id: string): Promise<ExcalidrawDoc | null> =>
   await initializeStoresIfNeeded();
 
   try {
-    // 1. If Supabase is configured, fetch latest version from cloud
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
-      if (user) {
-        const cloudDocs = await fetchDocumentsFromSupabase();
-        const cloudDoc =
-          cloudDocs.find((d) => d.id === id) ||
-          (id === "default" && cloudDocs.length > 0 ? cloudDocs[0] : null);
+      if (!user) {
+        return null;
+      }
 
-        if (cloudDoc) {
-          const cloudUpdatedAt = new Date(cloudDoc.updated_at).getTime();
-          const localDoc =
-            memoryDocs.get(cloudDoc.id) ||
-            (await get<ExcalidrawDoc>(cloudDoc.id, docsStore).catch(() => null));
-
-          if (!localDoc || cloudUpdatedAt >= localDoc.updatedAt) {
-            const docFiles = cloudDoc.files || (cloudDoc.app_state as any)?.files;
-            const doc: ExcalidrawDoc = {
-              id: cloudDoc.id,
-              title: cloudDoc.title,
-              folderId: cloudDoc.folder_id || null,
-              elements: cloudDoc.elements,
-              appState: cloudDoc.app_state,
-              thumbnail: cloudDoc.thumbnail_url || undefined,
-              files: docFiles,
-              createdAt: new Date(cloudDoc.created_at).getTime(),
-              updatedAt: cloudUpdatedAt,
-              syncedToCloud: true,
-            };
-            memoryDocs.set(doc.id, doc);
-            set(doc.id, doc, docsStore).catch(console.warn);
-            return doc;
-          }
+      let cloudDoc = id !== "default" ? await fetchDocumentFromSupabase(id) : null;
+      if (!cloudDoc) {
+        const list = await fetchDocumentListFromSupabase();
+        if (list.length > 0) {
+          const match = (id !== "default" ? list.find((d) => d.id === id) : null) || list[0];
+          cloudDoc = await fetchDocumentFromSupabase(match.id);
+        } else {
+          return await createDocument("Untitled Drawing");
         }
       }
+
+      if (cloudDoc) {
+        return cacheCloudDocument(cloudDoc);
+      }
+
+      const cached = memoryDocs.get(id);
+      return cached?.syncedToCloud ? cached : null;
     }
 
-    // 2. In-memory check
     if (memoryDocs.has(id)) {
       return memoryDocs.get(id)!;
     }
 
-    // 3. IndexedDB check
     const localDoc = await get<ExcalidrawDoc>(id, docsStore).catch(() => null);
     if (localDoc) {
       memoryDocs.set(id, localDoc);
       return localDoc;
     }
 
-    // 4. Default document check
     if (id === "default") {
-      const migrated = await migrateFromLocalStorageIfNeeded();
-      if (migrated) {
-        return migrated;
-      }
+      return migrateFromLocalStorageIfNeeded();
     }
 
     return null;
   } catch (error) {
     console.error("Failed to load document:", error);
     return null;
+  }
+};
+
+const cloudSyncDebounceTimers = new Map<string, number>();
+const cloudSyncInFlight = new Map<string, boolean>();
+const cloudSyncPendingDirty = new Map<string, boolean>();
+const CLOUD_SYNC_DEBOUNCE_MS = 1200;
+
+export const flushCloudSync = async (docId: string): Promise<boolean> => {
+  if (typeof window !== "undefined") {
+    const timer = cloudSyncDebounceTimers.get(docId);
+    if (timer) {
+      window.clearTimeout(timer);
+      cloudSyncDebounceTimers.delete(docId);
+    }
+  }
+  return executeCloudSync(docId);
+};
+
+const scheduleBackgroundCloudSync = (docId: string) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const existingTimer = cloudSyncDebounceTimers.get(docId);
+  if (existingTimer) {
+    window.clearTimeout(existingTimer);
+  }
+  cloudSyncDebounceTimers.set(
+    docId,
+    window.setTimeout(() => {
+      cloudSyncDebounceTimers.delete(docId);
+      executeCloudSync(docId);
+    }, CLOUD_SYNC_DEBOUNCE_MS),
+  );
+};
+
+const executeCloudSync = async (docId: string): Promise<boolean> => {
+  if (cloudSyncInFlight.get(docId)) {
+    cloudSyncPendingDirty.set(docId, true);
+    return false;
+  }
+
+  const latestDoc = memoryDocs.get(docId);
+  if (!latestDoc) {
+    return false;
+  }
+
+  cloudSyncInFlight.set(docId, true);
+  try {
+    const user = await getSupabaseUser();
+    if (!user) {
+      return false;
+    }
+
+    const success = await saveDocumentToSupabase({
+      id: latestDoc.id,
+      title: latestDoc.title,
+      folderId: latestDoc.folderId,
+      elements: latestDoc.elements,
+      appState: latestDoc.appState,
+      thumbnail: latestDoc.thumbnail,
+      files: latestDoc.files,
+    });
+
+    if (success) {
+      latestDoc.syncedToCloud = true;
+      const meta = memoryMeta.get(docId);
+      if (meta) {
+        meta.syncedToCloud = true;
+        set(docId, meta, metaStore).catch(console.warn);
+      }
+      set(docId, latestDoc, docsStore).catch(console.warn);
+    }
+    return success;
+  } catch (err) {
+    console.error("Cloud sync error for doc", docId, err);
+    return false;
+  } finally {
+    cloudSyncInFlight.delete(docId);
+    if (cloudSyncPendingDirty.get(docId)) {
+      cloudSyncPendingDirty.delete(docId);
+      scheduleBackgroundCloudSync(docId);
+    }
   }
 };
 
@@ -550,7 +675,22 @@ export const saveDocument = async (
   await initializeStoresIfNeeded();
 
   try {
-    const existing = memoryDocs.get(doc.id) || (await get<ExcalidrawDoc>(doc.id, docsStore).catch(() => null));
+    let docId = doc.id;
+    if (isSupabaseConfigured && docId === "default") {
+      const activeUrlId = getActiveDocIdFromUrl();
+      if (activeUrlId && activeUrlId !== "default") {
+        docId = activeUrlId;
+      } else {
+        docId = generateDocId();
+        setActiveDocIdToUrl(docId);
+      }
+    }
+
+    const existing =
+      memoryDocs.get(docId) ||
+      (isSupabaseConfigured
+        ? null
+        : await get<ExcalidrawDoc>(docId, docsStore).catch(() => null));
 
     const resolvedTitle =
       doc.title?.trim() ||
@@ -566,7 +706,7 @@ export const saveDocument = async (
         : null;
 
     const fullDoc: ExcalidrawDoc = {
-      id: doc.id,
+      id: docId,
       title: resolvedTitle,
       folderId: resolvedFolderId,
       elements: doc.elements || existing?.elements || [],
@@ -588,39 +728,15 @@ export const saveDocument = async (
       syncedToCloud: fullDoc.syncedToCloud,
     };
 
-    // Immediate in-memory update
     memoryDocs.set(fullDoc.id, fullDoc);
     memoryMeta.set(fullDoc.id, meta);
-
-    // Background IDB writes
     set(fullDoc.id, fullDoc, docsStore).catch(console.error);
     set(fullDoc.id, meta, metaStore).catch(console.error);
+    notifyStoreChanged("local");
 
-    // Supabase sync
     if (syncCloud && isSupabaseConfigured) {
-      getSupabaseUser().then((user) => {
-        if (user) {
-          saveDocumentToSupabase({
-            id: fullDoc.id,
-            title: fullDoc.title,
-            folderId: fullDoc.folderId,
-            elements: fullDoc.elements,
-            appState: fullDoc.appState,
-            thumbnail: fullDoc.thumbnail,
-            files: fullDoc.files,
-          }).then((success) => {
-            if (success) {
-              fullDoc.syncedToCloud = true;
-              meta.syncedToCloud = true;
-              set(fullDoc.id, fullDoc, docsStore).catch(console.warn);
-              set(fullDoc.id, meta, metaStore).catch(console.warn);
-            }
-          });
-        }
-      });
+      scheduleBackgroundCloudSync(fullDoc.id);
     }
-
-    notifyStoreChanged();
   } catch (error) {
     console.error("Failed to save document:", error);
   }
@@ -644,14 +760,17 @@ export const createDocument = async (
     title: cleanTitle,
     folderId: folderId || null,
     elements: initialData?.elements || [],
-    appState: { ...initialData?.appState, name: cleanTitle },
+    appState: { ...initialData?.appState, name: cleanTitle, isLoading: false },
     files: initialData?.files,
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    syncedToCloud: false,
   };
 
-  await saveDocument(doc);
-  notifyStoreChanged();
+  await saveDocument(doc, false);
+  if (isSupabaseConfigured) {
+    await executeCloudSync(doc.id);
+  }
   return doc;
 };
 
@@ -674,7 +793,6 @@ export const deletePdfFromDocument = async (docId: string): Promise<boolean> => 
     id: docId,
     elements: remainingElements,
   });
-  notifyStoreChanged();
   return true;
 };
 
@@ -701,7 +819,6 @@ export const duplicateDocument = async (id: string): Promise<ExcalidrawDoc | nul
     syncedToCloud: false,
   };
   await saveDocument(newDoc);
-  notifyStoreChanged();
   return newDoc;
 };
 
@@ -715,9 +832,9 @@ export const deleteDocument = async (id: string): Promise<boolean> => {
     del(id, metaStore).catch(console.error);
 
     if (isSupabaseConfigured) {
-      deleteDocumentFromSupabase(id).catch(console.warn);
+      await deleteDocumentFromSupabase(id);
     }
-    notifyStoreChanged();
+    notifyStoreChanged("local");
     return true;
   } catch (error) {
     console.error("Failed to delete document:", error);

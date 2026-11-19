@@ -46,6 +46,7 @@ import { FileStatusStore } from "./fileStatusStore";
 import { Locker } from "./Locker";
 import { updateBrowserStateVersion } from "./tabSync";
 import { saveDocument, getActiveDocumentId } from "./documentStore";
+import { isSupabaseConfigured } from "./supabase";
 
 const filesStore = createStore("files-db", "files-store");
 
@@ -71,7 +72,7 @@ class LocalFileManager extends FileManager {
   };
 }
 
-const saveDataStateToLocalStorage = (
+const saveDataStateToLocalStorage = async (
   elements: readonly ExcalidrawElement[],
   appState: AppState,
   files?: BinaryFiles,
@@ -89,8 +90,7 @@ const saveDataStateToLocalStorage = (
     const nonDeletedElements = getNonDeletedElements(elements);
     const activeDocId = getActiveDocumentId();
 
-    // 1. High-capacity persistence via IndexedDB and Supabase cloud sync (including binary files/PDFs)
-    saveDocument({
+    await saveDocument({
       id: activeDocId,
       title: _appState.name || undefined,
       elements: nonDeletedElements,
@@ -98,18 +98,19 @@ const saveDataStateToLocalStorage = (
       files,
     });
 
-    // 2. Best-effort write to localStorage for compatibility if it fits
-    try {
-      localStorage.setItem(
-        STORAGE_KEYS.LOCAL_STORAGE_ELEMENTS,
-        JSON.stringify(nonDeletedElements),
-      );
-      localStorage.setItem(
-        STORAGE_KEYS.LOCAL_STORAGE_APP_STATE,
-        JSON.stringify(_appState),
-      );
-    } catch {
-      // If localStorage is full, ignore it because data is safely stored in IndexedDB!
+    if (!isSupabaseConfigured) {
+      try {
+        localStorage.setItem(
+          STORAGE_KEYS.LOCAL_STORAGE_ELEMENTS,
+          JSON.stringify(nonDeletedElements),
+        );
+        localStorage.setItem(
+          STORAGE_KEYS.LOCAL_STORAGE_APP_STATE,
+          JSON.stringify(_appState),
+        );
+      } catch {
+        // If localStorage is full, ignore it because data is safely stored in IndexedDB
+      }
     }
 
     updateBrowserStateVersion(STORAGE_KEYS.VERSION_DATA_STATE);
@@ -142,7 +143,7 @@ export class LocalData {
       files: BinaryFiles,
       onFilesSaved: () => void,
     ) => {
-      saveDataStateToLocalStorage(elements, appState, files);
+      await saveDataStateToLocalStorage(elements, appState, files);
 
       await this.fileStorage.saveFiles({
         elements,

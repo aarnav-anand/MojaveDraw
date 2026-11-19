@@ -119,14 +119,19 @@ export const DocumentsDashboard: React.FC<DocumentsDashboardProps> = ({
   const modalRef = useRef<HTMLDivElement>(null);
 
   const fetchDocs = useCallback(async () => {
-    const list = await listDocuments();
-    setDocuments(list);
-    setActiveDocId(getActiveDocumentId());
-
     if (isSupabaseConfigured) {
       const user = await getSupabaseUser();
       setUserEmail(user?.email || null);
+      if (!user) {
+        setDocuments([]);
+        setActiveDocId(getActiveDocumentId());
+        return;
+      }
     }
+
+    const list = await listDocuments();
+    setDocuments(list.filter((d) => !!d.syncedToCloud));
+    setActiveDocId(getActiveDocumentId());
   }, []);
 
   useEffect(() => {

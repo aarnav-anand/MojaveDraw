@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS public.documents (
 
 -- Ensure folder_id exists if documents table was created earlier
 ALTER TABLE public.documents ADD COLUMN IF NOT EXISTS folder_id TEXT;
+ALTER TABLE public.documents ADD COLUMN IF NOT EXISTS files JSONB;
 
 -- Indexes for fast user queries and ordering
 CREATE INDEX IF NOT EXISTS idx_documents_user_id ON public.documents(user_id);
@@ -99,19 +100,53 @@ VALUES ('canvas-files', 'canvas-files', true)
 ON CONFLICT (id) DO UPDATE SET public = true;
 
 DROP POLICY IF EXISTS "Allow authenticated uploads" ON storage.objects;
-CREATE POLICY "Allow authenticated uploads"
+DROP POLICY IF EXISTS "Allow authenticated updates" ON storage.objects;
+DROP POLICY IF EXISTS "Allow public file reads" ON storage.objects;
+DROP POLICY IF EXISTS "Users can upload own canvas files" ON storage.objects;
+DROP POLICY IF EXISTS "Users can update own canvas files" ON storage.objects;
+DROP POLICY IF EXISTS "Users can delete own canvas files" ON storage.objects;
+DROP POLICY IF EXISTS "Allow public file reads" ON storage.objects;
+
+CREATE POLICY "Users can upload own canvas files"
   ON storage.objects FOR INSERT
   TO authenticated
-  WITH CHECK (bucket_id = 'canvas-files');
+  WITH CHECK (
+    bucket_id = 'canvas-files'
+    AND (storage.foldername(name))[1] = auth.uid()::text
+  );
 
-DROP POLICY IF EXISTS "Allow authenticated updates" ON storage.objects;
-CREATE POLICY "Allow authenticated updates"
+CREATE POLICY "Users can update own canvas files"
   ON storage.objects FOR UPDATE
   TO authenticated
-  USING (bucket_id = 'canvas-files');
+  USING (
+    bucket_id = 'canvas-files'
+    AND (storage.foldername(name))[1] = auth.uid()::text
+  );
 
-DROP POLICY IF EXISTS "Allow public file reads" ON storage.objects;
+CREATE POLICY "Users can delete own canvas files"
+  ON storage.objects FOR DELETE
+  TO authenticated
+  USING (
+    bucket_id = 'canvas-files'
+    AND (storage.foldername(name))[1] = auth.uid()::text
+  );
+
 CREATE POLICY "Allow public file reads"
   ON storage.objects FOR SELECT
   TO public
   USING (bucket_id = 'canvas-files');
+
+-- Realtime so folders and drawings sync live across devices
+DO $$
+BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.documents;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.folders;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;

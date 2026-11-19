@@ -169,6 +169,7 @@ import {
   loadDocument,
   saveDocument,
   createDocument,
+  flushCloudSync,
   setActiveDocIdToUrl,
   subscribeToStoreChanges,
 } from "./data/documentStore";
@@ -262,12 +263,17 @@ const initializeScene = async (opts: {
       opts.excalidrawAPI.addFiles(Object.values(currentDoc.files));
     }
   }
-  const localDataState = currentDoc
+  const localDataState: {
+    elements?: readonly ExcalidrawElement[] | null;
+    appState?: Partial<AppState> | null;
+  } = currentDoc
     ? {
         elements: currentDoc.elements,
-        appState: { ...currentDoc.appState, name: currentDoc.title },
+        appState: { ...currentDoc.appState, name: currentDoc.title, isLoading: false },
       }
-    : importFromLocalStorage();
+    : isSupabaseConfigured
+      ? { elements: [], appState: { isLoading: false } }
+      : importFromLocalStorage();
 
   let scene: Omit<
     RestoredDataState,
@@ -281,7 +287,10 @@ const initializeScene = async (opts: {
       repairBindings: true,
       deleteInvisibleElements: true,
     }),
-    appState: restoreAppState(localDataState?.appState, null),
+    appState: {
+      ...restoreAppState(localDataState?.appState, null),
+      isLoading: false,
+    },
   };
 
   let roomLinkData = getCollaborationLinkData(window.location.href);
@@ -614,30 +623,44 @@ const ExcalidrawWrapper = () => {
       return;
     }
 
-    const syncLatestFromCloud = async () => {
-      const user = await getSupabaseUser();
-      if (!user) {
-        setIsAuthModalOpen(true);
-      } else if (excalidrawAPI) {
+    let inFlight: Promise<void> | null = null;
+
+    const loadSignedInWorkspace = async () => {
+      if (inFlight) {
+        return inFlight;
+      }
+      inFlight = (async () => {
+        const user = await getSupabaseUser();
+        if (!user) {
+          setIsAuthModalOpen(true);
+          return;
+        }
+        if (!excalidrawAPI) {
+          return;
+        }
         const urlId = getActiveDocIdFromUrl();
         const cloudDocs = await listDocuments();
         if (cloudDocs.length > 0) {
-          const target = (urlId ? cloudDocs.find((d) => d.id === urlId) : null) || cloudDocs[0];
+          const target =
+            (urlId ? cloudDocs.find((d) => d.id === urlId) : null) || cloudDocs[0];
           await handleSwitchDocument(target.id, true);
+        } else {
+          const newDoc = await createDocument("Untitled Drawing");
+          await handleSwitchDocument(newDoc.id, true);
         }
-      }
+      })().finally(() => {
+        inFlight = null;
+      });
+      return inFlight;
     };
 
-    syncLatestFromCloud();
+    loadSignedInWorkspace();
 
     const unsubscribe = onSupabaseAuthStateChange(async (user) => {
-      if (user && excalidrawAPI) {
-        const urlId = getActiveDocIdFromUrl();
-        const cloudDocs = await listDocuments();
-        if (cloudDocs.length > 0) {
-          const target = (urlId ? cloudDocs.find((d) => d.id === urlId) : null) || cloudDocs[0];
-          await handleSwitchDocument(target.id, true);
-        }
+      if (user) {
+        await loadSignedInWorkspace();
+      } else {
+        setHasPdf(false);
       }
     });
 
@@ -646,8 +669,8 @@ const ExcalidrawWrapper = () => {
 
   // Synchronize changes from cloud/store updates into active canvas
   useEffect(() => {
-    const unsubscribe = subscribeToStoreChanges(async () => {
-      if (!excalidrawAPI) {
+    const unsubscribe = subscribeToStoreChanges(async (source) => {
+      if (source !== "remote" || !excalidrawAPI) {
         return;
       }
       const appState = excalidrawAPI.getAppState();
@@ -924,7 +947,9 @@ const ExcalidrawWrapper = () => {
                 elements: currentDoc.elements,
                 appState: { ...currentDoc.appState, name: currentDoc.title },
               }
-            : importFromLocalStorage();
+            : isSupabaseConfigured
+              ? { elements: [], appState: {} }
+              : importFromLocalStorage();
           const username = importUsernameFromLocalStorage();
           setLangCode(getPreferredLanguage());
           excalidrawAPI.updateScene({
